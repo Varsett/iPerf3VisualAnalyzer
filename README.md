@@ -254,4 +254,257 @@ powershell -WindowStyle Hidden -NoProfile -ExecutionPolicy Bypass ^
 
 ---
 
+---
+
+## What is this
+
+iPerf3 Visual Analyzer is a graphical tool for analyzing network test results produced by iPerf3. The script reads log files (.log, .txt), builds three synchronized charts (bitrate, jitter, packet loss) and displays per-session analytics. It supports simultaneous comparison of two sessions on shared axes, automatic screenshots, and batch execution from .bat files.
+
+---
+
+## System Requirements
+
+- Windows 7 / 10 / 11
+- PowerShell 5.1 or newer (built into Windows)
+- .NET Framework 4.5+ (built into Windows 8+)
+
+---
+
+## Running the Script
+
+### Simple launch (double-click or command line)
+
+If `.log` or `.txt` files are found in the same folder as the script, they are loaded automatically.  
+If no files are found, a folder selection dialog opens.
+
+```
+powershell -ExecutionPolicy Bypass -File iPerf3_v3.ps1
+```
+
+### From a .bat file (recommended for automation)
+
+**Important:** when passing string parameters from a .bat file, use `-Command` instead of `-File`.
+
+```bat
+@echo off
+set "SCRIPT=%~dp0iPerf3_v3.ps1"
+set "LOGDIR=%~dp0"
+
+powershell -WindowStyle Hidden -NoProfile -ExecutionPolicy Bypass ^
+  -Command "& '%SCRIPT%' -Path '%LOGDIR%' -AView 'Direct' -BView 'Reverse' -Screenshot -Exit"
+```
+
+---
+
+## Command-Line Parameters
+
+| Parameter | Description |
+|---|---|
+| `-Path` | Path to a folder with logs or to a specific file. Optional — if omitted, the script searches the folder containing the script. |
+| `-Label` | Session name or measurement location. Shown in the TEST INFO block. |
+| `-Interval` | iPerf3 reporting interval (e.g. `0.1s`). Shown in the TEST INFO block. |
+| `-Streams` | Number of parallel streams (iPerf3 `-P` parameter). Shown in the TEST INFO block. |
+| `-Duration` | Test duration (iPerf3 `-t` parameter). Shown in the TEST INFO block. |
+| `-TBitrate` | Requested bandwidth (e.g. `150M`). Shown in the TEST INFO block. |
+| `-WarnLoss` | Loss % threshold that triggers a warning in the window title. Default: `1.0`. |
+| `-AView` | Substring to match the filename for graph A. Case-insensitive. If multiple files match, the most recently modified is selected. |
+| `-BView` | Substring to match the filename for graph B. If omitted, graph B is not loaded automatically. |
+| `-FileName` | Output PNG filename (without extension). |
+| `-Screenshot` | Automatically save a screenshot on startup. |
+| `-Exit` | Close the window immediately after saving the screenshot. |
+
+### How -AView / -BView work
+
+The parameters search for a substring in the filenames found in the specified folder. The match is case-insensitive. If multiple files match, the one with the latest `LastWriteTime` is selected. If the file system timestamp is unavailable, the script attempts to parse a date from the filename using the pattern `YYYY-MM-DD_HH-MM-SS`.
+
+**Example filenames:**
+```
+WiFiTest-Direct-2026-05-13_01-24-51.txt    <- matched by  -AView "Direct"
+WiFiTest-Reverse-2026-05-13_01-24-51.txt   <- matched by  -BView "Reverse"
+```
+
+---
+
+## Interface
+
+### Top Control Bar
+
+| Element | Action |
+|---|---|
+| Dropdown A | Select the file for graph A (primary, solid lines) |
+| Button A | Hide / show graph A |
+| Dropdown B | Select the file for graph B (comparison, dashed lines) |
+| Button B | Hide / show graph B |
+| Summary | Overview table of all loaded files |
+| Save PNG | Save a screenshot of the full window |
+| CSV | Export session A data to a CSV file |
+| − / + | Decrease / increase time-axis zoom |
+| Legend | Color and line style reference |
+| Help | This help window |
+| Dark / Light | Toggle dark and light theme |
+
+### Working with Charts
+
+| Mouse action | Result |
+|---|---|
+| Left click | Place a gold cursor marker (sub-second precision) |
+| Right click | Reset zoom and remove marker |
+| Left drag | Box-zoom: zoom into the selected time interval |
+| Mouse wheel (when zoomed) | Scroll the time axis left / right |
+| Ctrl + mouse wheel | Smooth zoom in / out |
+
+All three charts are synchronized — zoom and marker apply to all simultaneously.
+
+### Tooltip
+
+Hovering over any chart area shows a tooltip with exact Bitrate, Jitter, and Loss values at the nearest data point. When graph B is loaded, both datasets are shown in the same tooltip.
+
+---
+
+## Charts
+
+### Bitrate (Mbps)
+Channel throughput at each point in time. Sharp drops indicate network congestion or interference.
+
+Reference lines on the chart:
+- **MAX** — maximum bitrate recorded in the session
+- **90% (green)** — excellent quality
+- **75% (yellow)** — warning
+- **50% (red)** — critical
+
+### Jitter (ms)
+Variability of inter-packet delay. Critical for voice calls, video conferencing, and online gaming.
+
+Thresholds:
+- < 0.2 ms — excellent
+- 0.2–0.8 ms — acceptable
+- 0.8–1.2 ms — poor
+- > 1.2 ms — critical
+
+### Loss (%)
+Percentage of lost packets. Even 1% loss is noticeable in practice.
+
+The 1% threshold is marked on the chart with a dashed line.
+
+---
+
+## Compare Mode (A vs B)
+
+Load a folder containing multiple log files. Select different files in dropdowns A and B — both datasets are displayed simultaneously:
+
+- **Solid lines** — file A
+- **Dashed lines** — file B
+- Window title shows both names: `A: filename_a  |  B: filename_b`
+- Tooltip shows values for both datasets at the same time point
+- Buttons **A** and **B** temporarily hide individual graphs
+
+---
+
+## Summary Window
+
+Opened with the **Summary** button. Displays a table with Min/Avg/Max for Bitrate, Jitter, and Loss for each loaded file.
+
+- Rows are color-coded by average loss: green / yellow / red
+- **Single click** — select a row
+- **Double click** — load the file as graph B and close the window
+
+The window width adjusts automatically to fit all columns.
+
+---
+
+## VERDICT Block (bottom of right column)
+
+Shows an overall quality rating for each session based on average values.
+
+### Loss ratings
+| Rating | Condition |
+|---|---|
+| PERFECT | 0% loss |
+| GOOD | up to 0.1% |
+| MODERATE | 0.1–1.0% |
+| HIGH | 1.0–3.0% |
+| CRITICAL | above 3.0% |
+
+### Jitter ratings
+| Rating | Condition |
+|---|---|
+| EXCELLENT | < 0.2 ms |
+| GOOD | 0.2–0.8 ms |
+| POOR | 0.8–1.2 ms |
+| CRITICAL | \> 1.2 ms |
+
+### Bitrate ratings
+Compares the minimum bitrate to the maximum within the session:
+
+| Rating | Condition |
+|---|---|
+| EXCELLENT | Min >= 90% of Max |
+| GOOD | Min >= 75% of Max |
+| POOR | Min >= 50% of Max |
+| CRITICAL | Min < 50% of Max |
+
+---
+
+## Exporting Data
+
+### PNG Screenshot
+The **Save PNG** button saves a screenshot of the full window to the same folder as the logs (or the folder specified in `-Path`). The filename is the name of the selected log file, or the value of `-FileName`.
+
+### CSV
+The **CSV** button exports the current session A data to a UTF-8 text file with comma separators (columns: Time, Bitrate_Mbps, Jitter_ms, Loss_pct).
+
+---
+
+## Automation Example
+
+**Scenario:** run an iPerf3 test nightly, save the logs, and automatically generate a comparison screenshot (forward and reverse directions).
+
+**File structure:**
+```
+C:\WiFiTest\
+  iPerf3_v3.ps1
+  run_test.bat
+  WiFiTest-Direct-2026-05-14_02-00-00.txt
+  WiFiTest-Reverse-2026-05-14_02-00-05.txt
+```
+
+**run_test.bat:**
+```bat
+@echo off
+set "SCRIPT=%~dp0iPerf3_v3.ps1"
+set "LOGDIR=%~dp0"
+set "DT=%date:~6,4%-%date:~3,2%-%date:~0,2%"
+
+powershell -WindowStyle Hidden -NoProfile -ExecutionPolicy Bypass ^
+  -Command "& '%SCRIPT%' -Path '%LOGDIR%' ^
+    -Label 'Office WiFi' ^
+    -AView 'Direct' -BView 'Reverse' ^
+    -FileName 'Report-%DT%' ^
+    -Screenshot -Exit"
+```
+
+Result: file `Report-2026-05-14.png` with both graphs saved to the log folder.
+
+---
+
+## Troubleshooting
+
+**Parameters are not passed from the .bat file**  
+Use `-Command "& 'path' -params"` instead of `-File`. With `-File`, quotes and special characters in arguments are handled differently by cmd.exe and may be lost or misinterpreted.
+
+**Chart is empty — "No valid UDP data found"**  
+The file does not contain UDP data rows (jitter/loss columns). Make sure iPerf3 was run in UDP mode (`-u`) and the log contains lines like:
+```
+[  5]   0.00-1.00  sec  18.9 MBytes  159 Mbits/sec  0.123 ms  0/2381 (0%)
+```
+
+**Script does not start (execution policy error)**  
+Add `-ExecutionPolicy Bypass` to the PowerShell command line.
+
+---
+
+*iPerf3 Visual Analyzer v3.2 — (c) 2026 Varset & Gemini Dev | rewrite by Claude*
+
+
+
 *iPerf3 Visual Analyzer v3.2 — (c) 2026 Varset & Gemini Dev | rewrite by Claude*
