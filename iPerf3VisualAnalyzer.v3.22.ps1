@@ -6,7 +6,7 @@ param (
     [string]$Interval      = "-",
     [string]$Streams       = "-",
     [string]$Duration      = "-",
-    [string]$TargetBitrate = "-",
+    [string]$TBitrate = "-",
     [string]$WarnLoss      = "1.0",
     [string]$FileName      = "",
     [string]$AView         = "",   # substring to match filename for graph A
@@ -154,7 +154,7 @@ $fntTitle = New-Object System.Drawing.Font("Segoe UI", 12, [System.Drawing.FontS
 #  FORM
 # ================================================================
 $form               = New-Object System.Windows.Forms.Form
-$form.Text          = "iPerf3 v3.20 Visual Diagnostic"
+$form.Text          = "iPerf3 v3.22 Visual Diagnostic"
 $form.Width         = 1680
 $form.Height        = 970
 $form.StartPosition = "CenterScreen"
@@ -256,68 +256,69 @@ function New-Btn([string]$text, [int]$left, [int]$width, [int]$top=16) {
 # ================================================================
 $sortedKeys = @($allTestData.Keys | Sort-Object)
 
-# Combo A
+# Combo A  — starts at ~129px to align with chart Y-axis (InnerPlotPosition.X=9%, chart ~1430px wide)
 $combo               = New-Object System.Windows.Forms.ComboBox
-$combo.Left          = 10; $combo.Top = 16; $combo.Width = 285; $combo.Font = $fntCombo
+$combo.Left          = 130; $combo.Top = 16; $combo.Width = 285; $combo.Font = $fntCombo
 $combo.DropDownStyle = "DropDownList"
 if ($sortedKeys.Count -eq 0) { [void]$combo.Items.Add("-- No data --") }
 foreach ($k in $sortedKeys) { [void]$combo.Items.Add($k) }
 $combo.SelectedIndex = 0
 $panel.Controls.Add($combo)
 
-# Button A (toggle visibility)
-$btnA              = New-Btn "A" 300 28
+# Button A
+$btnA              = New-Btn "A" 420 28
 $btnA.ForeColor    = [System.Drawing.Color]::DeepSkyBlue
 $script:showA      = $true
 
-# Combo B  (gap of 12px after btnA)
+# Combo B
 $combo2               = New-Object System.Windows.Forms.ComboBox
-$combo2.Left          = 340; $combo2.Top = 16; $combo2.Width = 285; $combo2.Font = $fntCombo
+$combo2.Left          = 460; $combo2.Top = 16; $combo2.Width = 285; $combo2.Font = $fntCombo
 $combo2.DropDownStyle = "DropDownList"
 [void]$combo2.Items.Add("-- No Compare --")
 foreach ($k in $sortedKeys) { [void]$combo2.Items.Add($k) }
 $combo2.SelectedIndex = 0
 $panel.Controls.Add($combo2)
 
-# Button B (toggle visibility, gap of 12px after combo2)
-$btnB              = New-Btn "B" 630 28
+# Button B
+$btnB              = New-Btn "B" 750 28
 $btnB.ForeColor    = [System.Drawing.Color]::MediumSpringGreen
 $script:showB      = $true
 
-# Action buttons (gap of 14px after btnB)
-$btnSummary = New-Btn "Summary" 674  80
-$btnSave    = New-Btn "Save PNG" 760  84
-$btnExport  = New-Btn "CSV"      850  52
+# Action buttons
+$btnSummary = New-Btn "Summary" 794  80
+$btnSave    = New-Btn "Save PNG" 880  84
+$btnExport  = New-Btn "CSV"      970  52
 
 # Zoom cluster
-$btnZoomOut      = New-Btn "-" 910 28
+$btnZoomOut      = New-Btn "-" 1030 28
 $btnZoomOut.Font = New-Object System.Drawing.Font("Arial", 12, [System.Drawing.FontStyle]::Bold)
 $btnZoomOut.UseCompatibleTextRendering = $true
 
 $lblZoom           = New-Object System.Windows.Forms.Label
-$lblZoom.Text      = "Zoom"; $lblZoom.Left = 941; $lblZoom.Top = 20
+$lblZoom.Text      = "Zoom"; $lblZoom.Left = 1061; $lblZoom.Top = 20
 $lblZoom.Width     = 46; $lblZoom.TextAlign = "MiddleCenter"; $lblZoom.Font = $fntLabel
 $panel.Controls.Add($lblZoom)
 
-$btnZoomIn       = New-Btn "+" 990 28
+$btnZoomIn       = New-Btn "+" 1110 28
 $btnZoomIn.Font  = New-Object System.Drawing.Font("Arial", 12, [System.Drawing.FontStyle]::Bold)
 $btnZoomIn.UseCompatibleTextRendering = $true
 
 # Warn label removed from top panel — verdict shown in stats column instead
 
-# Right-side buttons — Legend, Help, Dark/Light
-# Positioned by Reposition-RightButtons on resize
+# Right-side buttons: left edge of Legend aligns with Analytics label (statsContainer left+6)
+# statsContainer.Left = form.Width - 250; Analytics.Left = 6 inside statsContainer
+# So Legend.Left = chartRight + 6
 $btnLegend = New-Btn "Legend" 1160 72
 $btnHelp   = New-Btn "Help"   1238 62
-$btnDark   = New-Btn "Light" 1306 60   # starts dark, so button says "switch to Light"
+$btnDark   = New-Btn "Light"  1306 60
 $script:isDark = $true
 
 function Reposition-RightButtons {
-    # Chart area right edge = panel.Width - statsContainer.Width (250)
     $chartRight = $panel.Width - $statsContainer.Width
-    $btnDark.Left   = $chartRight - 68
-    $btnHelp.Left   = $chartRight - 138
-    $btnLegend.Left = $chartRight - 218
+    # Legend left edge aligns with Analytics label (offset +6 inside statsContainer)
+    $btnLegend.Left = $chartRight + 6
+    $btnHelp.Left   = $btnLegend.Left + $btnLegend.Width + 4
+    $btnDark.Left   = $btnHelp.Left   + $btnHelp.Width   + 4
 }
 $panel.Add_Resize({ Reposition-RightButtons })
 
@@ -413,7 +414,7 @@ function Update-Stats([array]$dataA, [string]$fnA, [array]$dataB, [string]$fnB) 
     Add-CL "  Interval: " $pc; Add-CL "$Interval`n"      $fg
     Add-CL "  Streams:  " $pc; Add-CL "$Streams`n"       $fg
     Add-CL "  Duration: " $pc; Add-CL "$Duration`n"      $fg
-    Add-CL "  Bitrate:  " $pc; Add-CL "$TargetBitrate`n" $fg
+    Add-CL "  Bitrate:  " $pc; Add-CL "$TBitrate`n" $fg
 }
 
 # ================================================================
@@ -744,7 +745,7 @@ function Update-Chart([string]$fileNameA, [string]$fileNameB) {
         $avgLossB = [math]::Round(($dataB.Loss | Measure-Object -Average).Average, 2)
         if ($avgLossB -gt $warnLossThreshold) { $isWarn = $true }
     }
-    $form.Text = if ($isWarn) { "iPerf3 v3.20  [!] HIGH LOSS" } else { "iPerf3 v3.20 Visual Diagnostic" }
+    $form.Text = if ($isWarn) { "iPerf3 v3.22  [!] HIGH LOSS" } else { "iPerf3 v3.22 Visual Diagnostic" }
 
     Update-Stats $dataA $fileNameA $dataB $fileNameB
 }
@@ -1143,13 +1144,13 @@ function Show-Legend {
 function Show-Help {
     $t  = $script:theme
     $hw = New-Object System.Windows.Forms.Form
-    $hw.Text            = "iPerf3 v3.20 - Help"
+    $hw.Text            = "iPerf3 v3.22 - Help"
     $hw.Width           = 980
-    $hw.Height          = 680
+    $hw.Height          = 820
     $hw.StartPosition   = "CenterParent"
     $hw.BackColor       = $t.Bg
     $hw.FormBorderStyle = "Sizable"
-    $hw.MinimumSize     = New-Object System.Drawing.Size(700, 500)
+    $hw.MinimumSize     = New-Object System.Drawing.Size(700, 620)
 
     $fntH   = New-Object System.Drawing.Font("Consolas", 9)
     $fntHdr = New-Object System.Drawing.Font("Arial", 9, [System.Drawing.FontStyle]::Bold)
@@ -1231,7 +1232,7 @@ function Show-Help {
     Lin  $col1 "-Interval"     "iPerf3 reporting step (e.g. 0.1s)"
     Lin  $col1 "-Streams"      "Parallel streams count (-P)"
     Lin  $col1 "-Duration"     "Total test duration (-t)"
-    Lin  $col1 "-TargetBitrate" "Requested bandwidth (e.g. 150M)"
+    Lin  $col1 "-TBitrate" "Requested bandwidth (e.g. 150M)"
     Lin  $col1 "-WarnLoss"     "Loss% warning threshold (default 1.0)"
     Lin  $col1 "-AView"        "Substring to select file for graph A"
     Txt  $col1 "                 Latest match by timestamp wins"
@@ -1254,6 +1255,18 @@ function Show-Help {
     Br   $col1
     Txt  $col1 "  NOTE: Use -Command not -File when passing"
     Txt  $col1 "  string parameters from a .bat file."
+    Br   $col1
+    Hdr  $col1 "EXTENDED MANUAL (Rus / Eng)"
+#    $col2.SelectionStart = $col2.TextLength
+#    $col2.SelectionColor = [System.Drawing.Color]::DeepSkyBlue
+#    $col2.AppendText("  https://github.com/Varsett/iPerf3VisualAnalyzer`n")
+#    Br   $col1
+#    Txt  $col1 "  
+#    Txt  $col1 "  
+    Txt  $col1 "https://github.com/Varsett/iPerf3VisualAnalyzer"
+    Br   $col1
+    Txt  $col1 "(c) 2026 Varset & Gemini Dev | v3.22 by Claude"
+
 
     # ---- COLUMN 2 ----
     Hdr  $col2 "DATA INTERPRETATION"
@@ -1311,9 +1324,13 @@ function Show-Help {
     Txt  $col2 "    matched by -AView 'Direct'"
     Txt  $col2 "  WiFiTest-Reverse-2026-05-13_01-24-51.txt"
     Txt  $col2 "    matched by -BView 'Reverse'"
-    Br   $col2
-
-    Txt  $col2 "  (c) 2026 Varset & Gemini Dev | v3.20 by Claude"
+#    Br   $col2
+#    Txt  $col2 "  (c) 2026 Varset & Gemini Dev | v3.22 by Claude"
+#    Br   $col2
+#    Hdr  $col2 "EXTENDED MANUAL (Rus / Eng)"
+#    $col2.SelectionStart = $col2.TextLength
+#    $col2.SelectionColor = [System.Drawing.Color]::DeepSkyBlue
+#    $col2.AppendText("  https://github.com/Varsett/iPerf3VisualAnalyzer`n")
 
     $hw.ShowDialog()
 }
