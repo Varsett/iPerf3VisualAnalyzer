@@ -56,7 +56,7 @@ powershell -WindowStyle Hidden -NoProfile -ExecutionPolicy Bypass ^
 | `-Interval` | Интервал отчётности iPerf3 (например `0.1s`). Отображается в блоке TEST INFO.  |
 | `-Streams` | Количество параллельных потоков (параметр `-P` в iPerf3). Отображается в блоке TEST INFO.  |
 | `-Duration` | Длительность теста (параметр `-t` в iPerf3). Отображается в блоке TEST INFO.  |
-| `-TargetBitrate` | Запрошенная полоса пропускания (например `150M`). Отображается в блоке TEST INFO.  |
+| `-TBitrate` | Запрошенная полоса пропускания (например `150M`). Отображается в блоке TEST INFO.  |
 | `-WarnLoss` | Порог потерь в % для отображения предупреждения в заголовке окна. По умолчанию `1.0`. |
 | `-AView` | Подстрока для поиска файла графика A. Регистронезависимо. При нескольких совпадениях выбирается самый свежий. |
 | `-BView` | Подстрока для поиска файла графика B. Если не указан — второй график не загружается. |
@@ -376,10 +376,10 @@ Reference lines on the chart:
 Variability of inter-packet delay. Critical for voice calls, video conferencing, and online gaming.
 
 Thresholds:
-- < 0.2 ms — excellent
-- 0.2–0.8 ms — acceptable
-- 0.8–1.2 ms — poor
-- > 1.2 ms — critical
+- **< 0.2 ms** — excellent
+- **0.2–0.8 ms** — acceptable
+- **0.8–1.2 ms** — poor
+- **\> 1.2 ms** — critical
 
 ### Loss (%)
 Percentage of lost packets. Even 1% loss is noticeable in practice.
@@ -502,9 +502,5 @@ The file does not contain UDP data rows (jitter/loss columns). Make sure iPerf3 
 Add `-ExecutionPolicy Bypass` to the PowerShell command line.
 
 ---
-
-*iPerf3 Visual Analyzer v3.2 — (c) 2026 Varset & Gemini Dev | rewrite by Claude*
-
-
 
 *iPerf3 Visual Analyzer v3.2 — (c) 2026 Varset & Gemini Dev | rewrite by Claude*
