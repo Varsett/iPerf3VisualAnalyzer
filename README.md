@@ -254,4 +254,4 @@ powershell -WindowStyle Hidden -NoProfile -ExecutionPolicy Bypass ^
 
 ---
 
-*iiPerf3 Visual Analyzer v3.2 — (c) 2026 Varset & Gemini Dev | rewrite by Claude*
+*iPerf3 Visual Analyzer v3.2 — (c) 2026 Varset & Gemini Dev | rewrite by Claude*
