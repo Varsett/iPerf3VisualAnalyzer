@@ -1,53 +1,126 @@
 [CmdletBinding()]
 param (
     [Parameter(Mandatory=$false, Position=0, ValueFromPipeline=$true)]
-    [string]$Path = "",
+    [string]$WorkDir  = "",     # folder where logs are stored (for scanning)
+    [string]$SavePath = "",     # folder where screenshots and CSV exports are saved
     [string]$Label         = "-",
     [string]$Interval      = "-",
     [string]$Streams       = "-",
     [string]$Duration      = "-",
-    [string]$TBitrate = "-",
+    [string]$Protocol      = "-",
+    [string]$TBitrate      = "-",
     [string]$WarnLoss      = "1.0",
     [string]$FileName      = "",
-    [string]$AView         = "",   # substring to match filename for graph A
-    [string]$BView         = "",   # substring to match filename for graph B
+    [string]$AView         = "",
+    [string]$BView         = "",
+    [string]$CsvPath       = "",
+    [switch]$AllLogs,
     [switch]$Screenshot,
     [switch]$Exit
 )
 
-# Resolve script directory for auto-discovery
+# Resolve script directory
 $scriptDir = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
 
 Add-Type -AssemblyName System.Windows.Forms, System.Windows.Forms.DataVisualization, System.Drawing
 [System.Windows.Forms.Application]::SetCompatibleTextRenderingDefault($true)
 
-# Priority 1: -Path given explicitly
-# Priority 2: logs found next to the script
-# Priority 3: open with no data (FolderBrowserDialog)
-if ($Path -ne "") {
-    $Path = $Path.Split('-')[0].Trim().Trim('"').Trim("'").TrimEnd('\')
-} else {
-    $autoFiles = Get-ChildItem -Path $scriptDir -File -ErrorAction SilentlyContinue |
-                 Where-Object { $_.Extension -match '\.(log|txt)' }
-    if ($autoFiles) {
-        $Path = $scriptDir
-    } else {
-        # No logs next to script — ask user
-        $fb = New-Object System.Windows.Forms.FolderBrowserDialog
-        $fb.Description = "Select folder with iPerf3 log files (or cancel to open empty)"
-        if ($fb.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
-            $Path = $fb.SelectedPath
-        } else {
-            $Path = ""   # will result in empty allTestData, handled below
-        }
-    }
+# ================================================================
+#  RESOLVE SCAN FOLDER
+#  Priority: -WorkDir > -Path > auto-discover next to script > dialog
+# ================================================================
+$scanPath = ""   # folder where logs will be scanned
+$outPath  = ""   # folder where screenshots/CSV exports are saved
+
+# Clean helper
+function Clean-Path([string]$p) {
+    return $p.Split('-')[0].Trim().Trim('"').Trim("'").TrimEnd('\')
 }
+
+if ($WorkDir -ne "") {
+    # -WorkDir: explicit log folder
+    $scanPath = Clean-Path $WorkDir
+    # Output: -SavePath if given, else script folder
+    $outPath  = if ($SavePath -ne "") { Clean-Path $SavePath } else { $scriptDir }
+} elseif ($SavePath -ne "") {
+    # -SavePath only: scan script folder, save to SavePath
+    $scanPath = $scriptDir
+    $outPath  = Clean-Path $SavePath
+} else {
+    # Auto-discover: check script folder
+    $autoFiles = Get-ChildItem -Path $scriptDir -File -ErrorAction SilentlyContinue |
+                 Where-Object { $_.Extension -match '\.(log|txt|csv)' }
+    if ($autoFiles) {
+        $scanPath = $scriptDir
+        $outPath  = $scriptDir
+    }
+    # If nothing found — open empty (no dialog)
+}
+
+# $scanPath is used by the parser; keep a $Path alias for any remaining refs
+$Path = $scanPath
 
 # ================================================================
 #  PARSE DATA
 # ================================================================
 $allTestData = @{}
 $totalsData  = @{}
+$script:isTCPLog = @{}
+$script:isCsvRT  = @{}   # tracks which allTestData keys came from RT-Monitor CSV
+
+# ----------------------------------------------------------------
+#  PARSE iPerf REAL-TIME MONITOR CSV
+#  Expected header: Time_sec,Bitrate_Mbps,Loss_pct,Jitter_ms
+#  Column order is detected from the header — order does not matter.
+#  Returns $true if the file was successfully parsed and added.
+#  Defined here (before the main loop) so .txt/.log files that don't
+#  match the iPerf3 format can fall back to this parser.
+# ----------------------------------------------------------------
+function Add-CsvRTLog([System.IO.FileInfo]$csvFile) {
+    # Read raw text and strip BOM if present, then split into lines.
+    # This avoids encoding-related mismatches between files saved by
+    # different tools/encodings.
+    $rawText = [System.IO.File]::ReadAllText($csvFile.FullName)
+    $rawText = $rawText.TrimStart([char]0xFEFF)   # strip UTF-8 BOM if present
+    $csvLines = $rawText -split "`r`n|`r|`n" | Where-Object { $_.Trim() -ne "" }
+    if ($csvLines.Count -lt 2) { return $false }
+
+    $headers = ($csvLines[0] -split ',') | ForEach-Object { $_.Trim().ToLower() }
+
+    $iTime    = [array]::IndexOf($headers, 'time_sec')
+    $iBit     = [array]::IndexOf($headers, 'bitrate_mbps')
+    $iLoss    = [array]::IndexOf($headers, 'loss_pct')
+    $iJitter  = [array]::IndexOf($headers, 'jitter_ms')
+
+    # Fallback: partial (substring) match on header names, case-insensitive
+    if ($iTime   -lt 0) { for ($k=0; $k -lt $headers.Count; $k++) { if ($headers[$k] -like '*time*')   { $iTime   = $k; break } } }
+    if ($iBit    -lt 0) { for ($k=0; $k -lt $headers.Count; $k++) { if ($headers[$k] -like '*bit*')    { $iBit    = $k; break } } }
+    if ($iLoss   -lt 0) { for ($k=0; $k -lt $headers.Count; $k++) { if ($headers[$k] -like '*loss*')   { $iLoss   = $k; break } } }
+    if ($iJitter -lt 0) { for ($k=0; $k -lt $headers.Count; $k++) { if ($headers[$k] -like '*jitter*') { $iJitter = $k; break } } }
+
+    if ($iTime -lt 0 -or $iBit -lt 0) { return $false }
+
+    $csvParsed = foreach ($row in ($csvLines | Select-Object -Skip 1)) {
+        $cols = $row -split ','
+        if ($cols.Count -le [math]::Max($iTime, $iBit)) { continue }
+        try {
+            $t = [math]::Round([double]$cols[$iTime].Trim(), 3)
+            $b = [math]::Round([double]$cols[$iBit].Trim(),  3)
+            $l = if ($iLoss   -ge 0 -and $cols.Count -gt $iLoss)   { [double]$cols[$iLoss].Trim()   } else { 0 }
+            $j = if ($iJitter -ge 0 -and $cols.Count -gt $iJitter) { [double]$cols[$iJitter].Trim() } else { 0 }
+            [PSCustomObject]@{ Time = $t; Bitrate = $b; Jitter = $j; Loss = $l }
+        } catch { }
+    }
+
+    if (-not $csvParsed) { return $false }
+
+    $csvKey = $csvFile.Name
+    $script:allTestData[$csvKey] = $csvParsed
+    $script:totalsData[$csvKey]  = $null
+    $script:isTCPLog[$csvKey]    = $false
+    $script:isCsvRT[$csvKey]     = $true
+    return $true
+}
 
 if ($Path -ne "" -and (Test-Path -Path $Path)) {
     $item        = Get-Item -Path $Path
@@ -57,7 +130,6 @@ if ($Path -ne "" -and (Test-Path -Path $Path)) {
     }
 
     $unitMap = @{ 'Gbits/sec' = 1000; 'Mbits/sec' = 1; 'Kbits/sec' = 0.001 }
-
     foreach ($file in $targetFiles) {
         $content  = Get-Content $file.FullName -Encoding UTF8
         $rawLines = $content | Where-Object {
@@ -65,12 +137,24 @@ if ($Path -ne "" -and (Test-Path -Path $Path)) {
         }
         $parsed = foreach ($line in $rawLines) {
             if ($line -match '(?<interval>\d+\.\d+-\d+\.\d+).+?\s+(?<bitrate>[\d.]+)\s+(?<unit>Gbits/sec|Mbits/sec|Kbits/sec)\s+(?<jitter>\d+\.\d+)\s+ms\s+(?<lost>\d+)/(?<total>\d+)\s+\((?<percent>\d+(\.\d+)?)\%\)') {
+                # UDP with jitter and loss
                 $mul = $unitMap[$Matches['unit']]
                 [PSCustomObject]@{
                     Time    = [math]::Round([double]($Matches['interval'].Split('-')[1]), 2)
                     Bitrate = [math]::Round([double]$Matches['bitrate'] * $mul, 3)
                     Jitter  = [double]$Matches['jitter']
                     Loss    = [double]$Matches['percent']
+                    IsTCP   = $false
+                }
+            } elseif ($line -match '(?<interval>\d+\.\d+-\d+\.\d+).+?\s+(?<bitrate>[\d.]+)\s+(?<unit>Gbits/sec|Mbits/sec|Kbits/sec)') {
+                # TCP or UDP without loss columns — bitrate only
+                $mul = $unitMap[$Matches['unit']]
+                [PSCustomObject]@{
+                    Time    = [math]::Round([double]($Matches['interval'].Split('-')[1]), 2)
+                    Bitrate = [math]::Round([double]$Matches['bitrate'] * $mul, 3)
+                    Jitter  = 0.0
+                    Loss    = 0.0
+                    IsTCP   = $true
                 }
             }
         }
@@ -80,9 +164,51 @@ if ($Path -ne "" -and (Test-Path -Path $Path)) {
                 Lost = [int]$Matches['lost']; Total = [int]$Matches['total']; Percent = [double]$Matches['percent']
             }
         } else { $totalsData[$file.Name] = $null }
-        if ($parsed) { $allTestData[$file.Name] = $parsed }
+        if ($parsed) {
+            $allTestData[$file.Name] = $parsed
+            # Mark as TCP if any point has IsTCP flag (no jitter/loss data)
+            $script:isTCPLog[$file.Name] = ($parsed | Where-Object { $_.IsTCP } | Select-Object -First 1) -ne $null
+        } else {
+            # Not a recognizable iPerf3 log — try RT-Monitor CSV format
+            # (handles .txt/.log files that are actually CSV, e.g. log_live_*.txt)
+            Add-CsvRTLog $file | Out-Null
+        }
     }
 }
+
+# ================================================================
+#  -CsvPath / FOLDER AUTO-SCAN FOR RT-MONITOR CSV
+#  (Add-CsvRTLog is defined above, before the main parsing loop)
+# ================================================================
+
+# Explicit -CsvPath — accepts a single CSV file OR a folder
+if ($CsvPath -ne "" -and (Test-Path -Path $CsvPath)) {
+    $csvItem = Get-Item -Path $CsvPath
+    if ($csvItem -is [System.IO.FileInfo]) {
+        # Single file specified directly
+        Add-CsvRTLog $csvItem | Out-Null
+    } elseif ($csvItem -is [System.IO.DirectoryInfo]) {
+        # Folder — scan for all CSV files in it
+        $csvFiles = Get-ChildItem -Path $CsvPath -File -Filter '*.csv' | Sort-Object Name
+        foreach ($cf in $csvFiles) {
+            if (-not $script:allTestData.ContainsKey($cf.Name)) {
+                Add-CsvRTLog $cf | Out-Null
+            }
+        }
+    }
+}
+
+# Auto-scan folder for additional RT-Monitor CSV files (.csv extension)
+# (.txt/.log files with CSV content are already handled by the fallback above)
+if ($Path -ne "" -and (Test-Path -Path $Path) -and (Get-Item -Path $Path) -is [System.IO.DirectoryInfo]) {
+    $csvFiles = Get-ChildItem -Path $Path -File -Filter '*.csv' | Sort-Object Name
+    foreach ($cf in $csvFiles) {
+        if (-not $script:allTestData.ContainsKey($cf.Name)) {
+            Add-CsvRTLog $cf | Out-Null
+        }
+    }
+}
+
 $warnLossThreshold = [double]$WarnLoss
 
 # ================================================================
@@ -154,7 +280,7 @@ $fntTitle = New-Object System.Drawing.Font("Segoe UI", 12, [System.Drawing.FontS
 #  FORM
 # ================================================================
 $form               = New-Object System.Windows.Forms.Form
-$form.Text          = "iPerf3 v3.22 Visual Diagnostic"
+$form.Text          = "iPerf3 v3.46 Visual Diagnostic"
 $form.Width         = 1680
 $form.Height        = 970
 $form.StartPosition = "CenterScreen"
@@ -256,12 +382,54 @@ function New-Btn([string]$text, [int]$left, [int]$width, [int]$top=16) {
 # ================================================================
 $sortedKeys = @($allTestData.Keys | Sort-Object)
 
+# Keys explicitly referenced get shown regardless of the All Logs toggle
+$script:alwaysVisibleKeys = New-Object System.Collections.Generic.HashSet[string]
+if ($CsvPath -ne "" -and (Test-Path $CsvPath)) {
+    [void]$script:alwaysVisibleKeys.Add((Get-Item $CsvPath).Name)
+}
+
+# All Logs toggle — when off, RT-Monitor CSV logs are hidden from dropdowns
+# unless explicitly referenced (e.g. via -CsvPath, or matched by -AView/-BView later).
+# The -AllLogs switch starts the toggle already pressed (same as clicking the button).
+$script:showAllLogs = $AllLogs.IsPresent
+
+function Get-VisibleKeys {
+    if ($script:showAllLogs) { return $sortedKeys }
+    return @($sortedKeys | Where-Object {
+        -not $script:isCsvRT[$_] -or $script:alwaysVisibleKeys.Contains($_)
+    })
+}
+
+# All Logs toggle button — sits left of combo A, in the space before the Y-axis alignment zone
+$btnAllLogs           = New-Btn "All Logs" 10 76
+$btnAllLogs.UseCompatibleTextRendering = $true
+
 # Combo A  — starts at ~129px to align with chart Y-axis (InnerPlotPosition.X=9%, chart ~1430px wide)
 $combo               = New-Object System.Windows.Forms.ComboBox
 $combo.Left          = 130; $combo.Top = 16; $combo.Width = 285; $combo.Font = $fntCombo
 $combo.DropDownStyle = "DropDownList"
-if ($sortedKeys.Count -eq 0) { [void]$combo.Items.Add("-- No data --") }
-foreach ($k in $sortedKeys) { [void]$combo.Items.Add($k) }
+
+function Refresh-ComboItems {
+    $visKeys = Get-VisibleKeys
+    $prevA = if ($combo.SelectedIndex -ge 0 -and $combo.Items.Count -gt 0) { $combo.SelectedItem.ToString() } else { $null }
+    $prevB = if ($combo2.SelectedIndex -gt 0 -and $combo2.Items.Count -gt 0) { $combo2.SelectedItem.ToString() } else { $null }
+
+    $combo.Items.Clear()
+    if ($visKeys.Count -eq 0) { [void]$combo.Items.Add("-- No data --") }
+    foreach ($k in $visKeys) { [void]$combo.Items.Add($k) }
+    $idxA = if ($prevA) { $combo.Items.IndexOf($prevA) } else { -1 }
+    $combo.SelectedIndex = if ($idxA -ge 0) { $idxA } else { 0 }
+
+    $combo2.Items.Clear()
+    [void]$combo2.Items.Add("-- No Compare --")
+    foreach ($k in $visKeys) { [void]$combo2.Items.Add($k) }
+    $idxB = if ($prevB) { $combo2.Items.IndexOf($prevB) } else { -1 }
+    $combo2.SelectedIndex = if ($idxB -ge 0) { $idxB } else { 0 }
+}
+
+$script:visKeysInit = Get-VisibleKeys
+if ($script:visKeysInit.Count -eq 0) { [void]$combo.Items.Add("-- No data --") }
+foreach ($k in $script:visKeysInit) { [void]$combo.Items.Add($k) }
 $combo.SelectedIndex = 0
 $panel.Controls.Add($combo)
 
@@ -275,7 +443,7 @@ $combo2               = New-Object System.Windows.Forms.ComboBox
 $combo2.Left          = 460; $combo2.Top = 16; $combo2.Width = 285; $combo2.Font = $fntCombo
 $combo2.DropDownStyle = "DropDownList"
 [void]$combo2.Items.Add("-- No Compare --")
-foreach ($k in $sortedKeys) { [void]$combo2.Items.Add($k) }
+foreach ($k in (Get-VisibleKeys)) { [void]$combo2.Items.Add($k) }
 $combo2.SelectedIndex = 0
 $panel.Controls.Add($combo2)
 
@@ -360,9 +528,11 @@ function Update-Stats([array]$dataA, [string]$fnA, [array]$dataB, [string]$fnB) 
                          [System.Drawing.Color]$cBit,
                          [System.Drawing.Color]$cJit,
                          [System.Drawing.Color]$cLos) {
+        $isTCP = $script:isTCPLog[$fn]
         Add-CL "======================`n" $sep
         Add-CL "  [$tag] " $cBit
         Add-CL "$fn`n" $fg
+        if ($isTCP) { Add-CL "  [TCP - Bitrate only]`n" $t.FgDim }
         Add-CL "----------------------`n" $sep
 
         $bMin = ($data.Bitrate | Measure-Object -Min).Minimum
@@ -375,14 +545,15 @@ function Update-Stats([array]$dataA, [string]$fnA, [array]$dataB, [string]$fnB) 
         Add-CL "  AVG: $bAvg`n" $fg
         Add-CL "  MAX: $bMax`n`n" $fg
 
-        $jMin = [math]::Round(($data.Jitter | Measure-Object -Min).Minimum, 3)
-        $jMax = [math]::Round(($data.Jitter | Measure-Object -Max).Maximum, 3)
-        $jAvg = [math]::Round(($data.Jitter | Measure-Object -Average).Average, 3)
+        if (-not $isTCP) {
+            $jMin = [math]::Round(($data.Jitter | Measure-Object -Min).Minimum, 3)
+            $jMax = [math]::Round(($data.Jitter | Measure-Object -Max).Maximum, 3)
+            $jAvg = [math]::Round(($data.Jitter | Measure-Object -Average).Average, 3)
 
-        Add-CL "  JITTER (ms)`n" $cJit
-        Add-CL "  MIN: " $fg; Add-CL "$jMin`n" (Get-JitterColor $jMin)
-        Add-CL "  AVG: $jAvg`n" $fg
-        Add-CL "  MAX: " $fg; Add-CL "$jMax`n`n" (Get-JitterColor $jMax)
+            Add-CL "  JITTER (ms)`n" $cJit
+            Add-CL "  MIN: " $fg; Add-CL "$jMin`n" (Get-JitterColor $jMin)
+            Add-CL "  AVG: $jAvg`n" $fg
+            Add-CL "  MAX: " $fg; Add-CL "$jMax`n`n" (Get-JitterColor $jMax)
 
         $lMin = [math]::Round(($data.Loss | Measure-Object -Min).Minimum, 2)
         $lMax = [math]::Round(($data.Loss | Measure-Object -Max).Maximum, 2)
@@ -400,6 +571,7 @@ function Update-Stats([array]$dataA, [string]$fnA, [array]$dataB, [string]$fnB) 
             Add-CL "$($td.Lost)" (Get-LostPktColor $td.Lost $td.Total)
             Add-CL " / $($td.Total)`n" $fg
         } else { Add-CL "n/a`n" $fg }
+        }   # end if (-not $isTCP)
     }
 
     Print-Block $dataA $fnA "A" $t.Bit  $t.Jit  $t.Los
@@ -411,6 +583,7 @@ function Update-Stats([array]$dataA, [string]$fnA, [array]$dataB, [string]$fnB) 
     Add-CL "  TEST INFO`n" $t.AccentB
     $pc = $t.AccentA
     Add-CL "  Label:    " $pc; Add-CL "$Label`n"         $fg
+    Add-CL "  Protocol: " $pc; Add-CL "$Protocol`n"      $fg
     Add-CL "  Interval: " $pc; Add-CL "$Interval`n"      $fg
     Add-CL "  Streams:  " $pc; Add-CL "$Streams`n"       $fg
     Add-CL "  Duration: " $pc; Add-CL "$Duration`n"      $fg
@@ -464,26 +637,35 @@ function Update-Verdict([array]$dataA, [string]$fnA, [array]$dataB, [string]$fnB
     #       Bitrate xx%     VERDICT
     function Print-Verdict([array]$data, [string]$tag, [System.Drawing.Color]$tagColor) {
         $lAvg   = [math]::Round(($data.Loss   | Measure-Object -Average).Average, 2)
-        $jAvg   = [math]::Round(($data.Jitter | Measure-Object -Average).Average, 3)
+        $jMax   = [math]::Round(($data.Jitter | Measure-Object -Max).Maximum, 3)
         $bMin   = ($data.Bitrate | Measure-Object -Min).Minimum
         $bMax   = ($data.Bitrate | Measure-Object -Max).Maximum
         $bRatio = if ($bMax -gt 0) { $bMin / $bMax } else { 0 }
         $bPct   = [math]::Round($bRatio * 100)
 
         $vLoss = Get-VerdictEntry $lAvg   "loss"
-        $vJit  = Get-VerdictEntry $jAvg   "jitter"
+        $vJit  = Get-VerdictEntry $jMax   "jitter"
         $vBit  = Get-VerdictEntry $bRatio "bitrate"
 
-        # " A:  Loss    " — tag is 4 chars (" A: "), metric padded to 8
-        $fgVal = [System.Drawing.Color]::FromArgb(210, 210, 215)   # bright but not pure white
+        $fgVal = [System.Drawing.Color]::FromArgb(210, 210, 215)
+        $isTCP = ($data | Where-Object { $_.IsTCP } | Select-Object -First 1) -ne $null
+
         Add-VL " ${tag}: " $tagColor
         Add-VL "Loss    " $t.Fg
-        Add-VL "$($lAvg.ToString('0.00').PadLeft(5))%  " $fgVal
-        Add-VL "$($vLoss[0])`n" $vLoss[1]
+        if ($isTCP) {
+            Add-VL "  n/a (TCP)`n" $t.FgDim
+        } else {
+            Add-VL "$($lAvg.ToString('0.00').PadLeft(5))%  " $fgVal
+            Add-VL "$($vLoss[0])`n" $vLoss[1]
+        }
         Add-VL "     "  $t.FgDim
         Add-VL "Jitter  " $t.Fg
-        Add-VL "$($jAvg.ToString('0.000')) ms " $fgVal
-        Add-VL "$($vJit[0])`n"  $vJit[1]
+        if ($isTCP) {
+            Add-VL "  n/a (TCP)`n" $t.FgDim
+        } else {
+            Add-VL "$($jMax.ToString('0.000')) ms " $fgVal
+            Add-VL "$($vJit[0])`n"  $vJit[1]
+        }
         Add-VL "     "  $t.FgDim
         Add-VL "Bitrate " $t.Fg
         Add-VL "$($bPct.ToString().PadLeft(3))%      " $fgVal
@@ -515,7 +697,7 @@ function Apply-Theme-To-Controls {
     $verdictBox.ForeColor     = $t.Fg
 
     foreach ($c in @($btnSave, $btnHelp, $btnLegend, $btnDark, $combo, $combo2,
-                     $btnZoomIn, $btnZoomOut, $btnSummary, $btnExport, $btnA, $btnB)) {
+                     $btnZoomIn, $btnZoomOut, $btnSummary, $btnExport, $btnA, $btnB, $btnAllLogs)) {
         $c.BackColor = $t.Ctrl
         $c.ForeColor = if ($c -eq $btnA) { $t.Bit }
                        elseif ($c -eq $btnB) { $t.Bit2 }
@@ -524,6 +706,11 @@ function Apply-Theme-To-Controls {
             $c.FlatAppearance.BorderColor = $t.CtrlBorder
             $c.FlatAppearance.BorderSize  = 1
         }
+    }
+    # All Logs toggle: highlight when active
+    if ($script:showAllLogs) {
+        $btnAllLogs.BackColor = $t.AccentA
+        $btnAllLogs.ForeColor = $t.Bg
     }
     Reposition-RightButtons
 }
@@ -546,15 +733,15 @@ function Make-ChartArea([string]$name, [string]$yTitle, [bool]$showXTitle, [bool
     $a.AxisY.LabelStyle.Font      = $fntMonoS
     $a.AxisX.LabelStyle.Format    = "0.##"
     $a.AxisX.ScaleView.Zoomable   = $true
-    $a.CursorX.IsUserEnabled           = $true
-    $a.CursorX.IsUserSelectionEnabled  = $true
+    $a.CursorX.IsUserEnabled           = $false
+    $a.CursorX.IsUserSelectionEnabled  = $false
     $a.CursorX.LineColor               = $t.Cursor
     $a.CursorX.LineWidth               = 2
-    $a.InnerPlotPosition.Auto    = $false
-    $a.InnerPlotPosition.X       = 9
-    $a.InnerPlotPosition.Y       = 8
-    $a.InnerPlotPosition.Width   = 87
-    $a.InnerPlotPosition.Height  = 82
+    $a.InnerPlotPosition.Auto   = $false
+    $a.InnerPlotPosition.X      = 8
+    $a.InnerPlotPosition.Width  = 90
+    $a.InnerPlotPosition.Y      = 6
+    $a.InnerPlotPosition.Height = 82
     $a.AxisX.ScrollBar.Enabled   = $showScroll
     if ($showScroll) {
         $a.AxisX.ScrollBar.BackColor   = $t.Bg
@@ -641,9 +828,14 @@ function Update-Chart([string]$fileNameA, [string]$fileNameB) {
         $fullW = $chart.Width
         $titleH = [int]($script:titleFont.GetHeight() + 10)
 
+        # Vertically center title within the top margin zone (7% of chart height)
+        $topZoneH = $chart.Height * 0.07
+        $titleY   = [int](($topZoneH - $script:titleFont.GetHeight()) / 2)
+        if ($titleY -lt 2) { $titleY = 2 }
+
         # Background strip
         $bgBrush = New-Object System.Drawing.SolidBrush($script:titleBg)
-        $g.FillRectangle($bgBrush, 0, 2, $fullW, $titleH)
+        $g.FillRectangle($bgBrush, 0, 0, $fullW, [int]$topZoneH)
         $bgBrush.Dispose()
 
         if ($null -ne $script:titleFileB) {
@@ -668,11 +860,11 @@ function Update-Chart([string]$fileNameA, [string]$fileNameB) {
             $brushBDim= New-Object System.Drawing.SolidBrush($script:titleBit2Dim)
             $brushSep = New-Object System.Drawing.SolidBrush($script:titleSepColor)
 
-            $g.DrawString($lblA,  $script:titleFont, $brushA,    $x, 4); $x += $szLblA.Width
-            $g.DrawString($fileA, $script:titleFont, $brushADim, $x, 4); $x += $szFileA.Width
-            $g.DrawString($sep,   $script:titleFont, $brushSep,  $x, 4); $x += $szSep.Width
-            $g.DrawString($lblB,  $script:titleFont, $brushB,    $x, 4); $x += $szLblB.Width
-            $g.DrawString($fileB, $script:titleFont, $brushBDim, $x, 4)
+            $g.DrawString($lblA,  $script:titleFont, $brushA,    $x, $titleY); $x += $szLblA.Width
+            $g.DrawString($fileA, $script:titleFont, $brushADim, $x, $titleY); $x += $szFileA.Width
+            $g.DrawString($sep,   $script:titleFont, $brushSep,  $x, $titleY); $x += $szSep.Width
+            $g.DrawString($lblB,  $script:titleFont, $brushB,    $x, $titleY); $x += $szLblB.Width
+            $g.DrawString($fileB, $script:titleFont, $brushBDim, $x, $titleY)
 
             $brushA.Dispose(); $brushADim.Dispose()
             $brushB.Dispose(); $brushBDim.Dispose(); $brushSep.Dispose()
@@ -680,7 +872,7 @@ function Update-Chart([string]$fileNameA, [string]$fileNameB) {
             $brushA = New-Object System.Drawing.SolidBrush($script:titleBitColor)
             $szFull = $g.MeasureString($script:titleFileA, $script:titleFont)
             $startX = [int](($fullW - $szFull.Width) / 2)
-            $g.DrawString($script:titleFileA, $script:titleFont, $brushA, $startX, 4)
+            $g.DrawString($script:titleFileA, $script:titleFont, $brushA, $startX, $titleY)
             $brushA.Dispose()
         }
     })
@@ -696,6 +888,9 @@ function Update-Chart([string]$fileNameA, [string]$fileNameB) {
         if ($maxB2 -gt $maxB) { $maxB = $maxB2 }
     }
     if ($maxB -gt 0) {
+        # Give 8% headroom above maxB so the auto-generated top Y-axis label
+        # has room and doesn't collide with the file-name title above the chart
+        $areaB.AxisY.Maximum = $maxB * 1.08
         Add-StripLine $areaB.AxisY $maxB           $t.Fg        "MAX ($maxB Mbps)"
         Add-StripLine $areaB.AxisY ($maxB * 0.90)  $t.GreenLvl  "90% EXCELLENT"
         Add-StripLine $areaB.AxisY ($maxB * 0.75)  ([System.Drawing.Color]::Yellow) "75% WARNING"
@@ -712,6 +907,21 @@ function Update-Chart([string]$fileNameA, [string]$fileNameB) {
     $chart.ChartAreas.Add($areaB)
     $chart.ChartAreas.Add($areaJ)
     $chart.ChartAreas.Add($areaL)
+
+    # Explicit equal-height layout for all three areas, with a top margin
+    # reserved for the file-name title drawn via PostPaint.
+    $topMargin    = 6.0   # % of chart height reserved for title
+    $bottomMargin = 5.0   # % of chart height reserved for "Time (seconds)" label
+    $rowH = (100.0 - $topMargin - $bottomMargin) / 3.0
+    $i = 0
+    foreach ($a in $chart.ChartAreas) {
+        $a.Position.Auto   = $false
+        $a.Position.X      = 0
+        $a.Position.Width  = 100
+        $a.Position.Y      = $topMargin + ($i * $rowH)
+        $a.Position.Height = $rowH
+        $i++
+    }
 
     # Series
     function Add-Series([string]$name,[string]$area,[System.Drawing.Color]$color,
@@ -734,6 +944,35 @@ function Update-Chart([string]$fileNameA, [string]$fileNameB) {
         Add-Series "Loss_B"    "Loss"    $t.Los2 $dataB "Loss"    $true $script:showB
     }
 
+    # For TCP logs: hide Jitter/Loss series and annotate chart areas
+    $tcpA = $script:isTCPLog[$fileNameA]
+    $tcpB = if ($null -ne $dataB) { $script:isTCPLog[$fileNameB] } else { $false }
+
+    if ($tcpA) {
+        ($chart.Series | Where-Object { $_.Name -eq "Jitter_A" -or $_.Name -eq "Loss_A" }) |
+            ForEach-Object { $_.Enabled = $false }
+    }
+    if ($tcpB) {
+        ($chart.Series | Where-Object { $_.Name -eq "Jitter_B" -or $_.Name -eq "Loss_B" }) |
+            ForEach-Object { $_.Enabled = $false }
+    }
+
+    # Label Jitter/Loss areas as N/A if both datasets are TCP
+    if ($tcpA -and ($null -eq $dataB -or $tcpB)) {
+        foreach ($aName in @("Jitter","Loss")) {
+            $ca = $chart.ChartAreas | Where-Object { $_.Name -eq $aName }
+            if ($ca) {
+                $ann = New-Object System.Windows.Forms.DataVisualization.Charting.Title("N/A (TCP - no $aName data)")
+                $ann.Font      = New-Object System.Drawing.Font("Consolas", 9)
+                $ann.ForeColor = $t.FgDim
+                $ann.DockedToChartArea = $aName
+                $ann.IsDockedInsideChartArea = $true
+                $ann.Alignment = [System.Drawing.ContentAlignment]::MiddleCenter
+                $chart.Titles.Add($ann)
+            }
+        }
+    }
+
     # Verdict box
     Update-Verdict $dataA $fileNameA $dataB $fileNameB
     Reposition-Verdict
@@ -745,7 +984,7 @@ function Update-Chart([string]$fileNameA, [string]$fileNameB) {
         $avgLossB = [math]::Round(($dataB.Loss | Measure-Object -Average).Average, 2)
         if ($avgLossB -gt $warnLossThreshold) { $isWarn = $true }
     }
-    $form.Text = if ($isWarn) { "iPerf3 v3.22  [!] HIGH LOSS" } else { "iPerf3 v3.22 Visual Diagnostic" }
+    $form.Text = if ($isWarn) { "iPerf3 v3.46  [!] HIGH LOSS" } else { "iPerf3 v3.46 Visual Diagnostic" }
 
     Update-Stats $dataA $fileNameA $dataB $fileNameB
 }
@@ -777,38 +1016,7 @@ $btnB.Add_Click({
 # ================================================================
 #  TOOLTIP ON MOUSE MOVE
 # ================================================================
-$chart.Add_MouseMove({
-    param($sender, $e)
-    try {
-        $hit = $chart.HitTest($e.X, $e.Y, $false,
-            [System.Windows.Forms.DataVisualization.Charting.ChartElementType]::PlottingArea)
-        if ($null -eq $hit -or $null -eq $hit.ChartArea) { $toolTip.SetToolTip($chart, ""); return }
-        $xVal    = $hit.ChartArea.AxisX.PixelPositionToValue($e.X)
-        $xVal    = [math]::Round($xVal, 2)
-        $fnA     = $combo.SelectedItem.ToString()
-        $nearest = $allTestData[$fnA] | Sort-Object { [math]::Abs($_.Time - $xVal) } | Select-Object -First 1
-        if ($null -eq $nearest) { return }
-
-        $tip  = "--- A ---`n"
-        $tip += "T = $($nearest.Time) s`n"
-        $tip += "Bitrate: $($nearest.Bitrate) Mbps`n"
-        $tip += "Jitter:  $($nearest.Jitter) ms`n"
-        $tip += "Loss:    $($nearest.Loss) %"
-
-        $fnB   = if ($combo2.SelectedIndex -gt 0) { $combo2.SelectedItem.ToString() } else { $null }
-        if ($null -ne $fnB -and $allTestData.ContainsKey($fnB)) {
-            $nb = $allTestData[$fnB] | Sort-Object { [math]::Abs($_.Time - $xVal) } | Select-Object -First 1
-            if ($null -ne $nb) {
-                $tip += "`n--- B ---`n"
-                $tip += "T = $($nb.Time) s`n"
-                $tip += "Bitrate: $($nb.Bitrate) Mbps`n"
-                $tip += "Jitter:  $($nb.Jitter) ms`n"
-                $tip += "Loss:    $($nb.Loss) %"
-            }
-        }
-        $toolTip.SetToolTip($chart, $tip)
-    } catch {}
-})
+# Tooltip and drag handled in Add_MouseMove below
 
 # ================================================================
 #  SUMMARY WINDOW
@@ -884,6 +1092,10 @@ function Show-Summary {
         if ($ge.RowIndex -lt 0) { return }
         $clickedFn = $rowMap[$ge.RowIndex]
         if ($null -eq $clickedFn) { return }
+        if ($script:isCsvRT[$clickedFn]) {
+            [void]$script:alwaysVisibleKeys.Add($clickedFn)
+            Refresh-ComboItems
+        }
         $idx = $combo2.Items.IndexOf($clickedFn)
         if ($idx -ge 0) { $combo2.SelectedIndex = $idx }
         $sw.Close()
@@ -907,7 +1119,7 @@ function Show-Summary {
 function Export-CSV {
     $fn      = $combo.SelectedItem.ToString()
     $data    = $allTestData[$fn]
-    $outDir  = if (Test-Path $Path -PathType Container) { $Path } else { (Get-Item $Path).DirectoryName }
+    $outDir  = if ($outPath -ne '') { $outPath } elseif (Test-Path $Path -PathType Container) { $Path } else { (Get-Item $Path).DirectoryName }
     $baseName = ($fn -replace '\.[^.]+$', '') + "_export.csv"
     $csvPath  = Join-Path $outDir $baseName
     $lines    = [System.Collections.Generic.List[string]]::new()
@@ -984,16 +1196,10 @@ $chart.Add_MouseWheel({
 })
 
 # ================================================================
-#  SYNC CURSOR / ZOOM
+#  SYNC ZOOM (AxisViewChanged only — no cursor sync needed)
 # ================================================================
 $script:syncLock = $false
-$chart.Add_CursorPositionChanged({
-    param($s, $e)
-    if ($script:syncLock) { return }
-    $script:syncLock = $true
-    try { foreach ($a in $chart.ChartAreas) { $a.CursorX.Position = $e.NewPosition }; $chart.Invalidate() }
-    finally { $script:syncLock = $false }
-})
+
 $chart.Add_AxisViewChanged({
     param($s, $e)
     if ($null -eq $e.Axis -or $e.Axis.AxisName -ne "X") { return }
@@ -1007,10 +1213,151 @@ $chart.Add_AxisViewChanged({
         }
     } finally { $script:syncLock = $false }
 })
-$chart.Add_MouseClick({
+
+# ================================================================
+#  MANUAL MOUSE INTERACTION
+#  Left click  = snap marker to nearest data point
+#  Left drag   = rubber-band select -> zoom to that time range
+#  Right click = reset zoom and marker
+# ================================================================
+$script:dragStart    = -1.0   # data-X where drag began (-1 = no drag)
+$script:dragStartPx  = -1     # pixel X where drag began
+$script:dragCurPx    = -1     # current pixel X during drag (for rubber-band)
+$script:isDragging   = $false
+
+# Paint overlay — rubber-band selection rectangle during drag
+$chart.Add_Paint({
     param($s, $e)
+    if (-not $script:isDragging -or $script:dragStartPx -lt 0 -or $script:dragCurPx -lt 0) { return }
+    $x1 = [math]::Min($script:dragStartPx, $script:dragCurPx)
+    $x2 = [math]::Max($script:dragStartPx, $script:dragCurPx)
+    if ($x2 - $x1 -lt 2) { return }
+    $g  = $e.Graphics
+    $fb = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(50, 100, 180, 255))
+    $g.FillRectangle($fb, $x1, 0, $x2 - $x1, $chart.Height)
+    $fb.Dispose()
+    $pen = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(200, 120, 200, 255), 1)
+    $pen.DashStyle = [System.Drawing.Drawing2D.DashStyle]::Dash
+    $g.DrawLine($pen, $x1, 0, $x1, $chart.Height)
+    $g.DrawLine($pen, $x2, 0, $x2, $chart.Height)
+    $pen.Dispose()
+})
+
+# Helper: convert pixel X on chart control to nearest data Time value
+function Px-ToDataX([int]$pixelX) {
+    if ($chart.ChartAreas.Count -eq 0) { return [double]::NaN }
+    $area = $chart.ChartAreas[0]
+    try {
+        $val = $area.AxisX.PixelPositionToValue($pixelX)
+        # Snap to nearest actual data point
+        $fnA  = $combo.SelectedItem.ToString()
+        $data = $allTestData[$fnA]
+        if (-not $data) { return [math]::Round($val, 3) }
+        $nearest = $data | Sort-Object { [math]::Abs($_.Time - $val) } | Select-Object -First 1
+        return $nearest.Time
+    } catch { return [double]::NaN }
+}
+
+# Helper: is pixel X inside any chart plot area?
+function Px-InPlotArea([int]$pixelX, [int]$pixelY) {
+    if ($chart.ChartAreas.Count -eq 0) { return $false }
+    $chartW = [double]$chart.Width
+    $chartH = [double]$chart.Height
+    $xPct   = ($pixelX / $chartW) * 100.0
+    $yPct   = ($pixelY / $chartH) * 100.0
+    foreach ($a in $chart.ChartAreas) {
+        # Use Position (outer area bounds in %)
+        $p = $a.Position
+        if ($xPct -ge $p.X -and $xPct -le ($p.X + $p.Width) -and
+            $yPct -ge $p.Y -and $yPct -le ($p.Y + $p.Height)) {
+            return $true
+        }
+    }
+    return $false
+}
+
+$chart.Add_MouseDown({
+    param($s, $e)
+    if (-not (Px-InPlotArea $e.X $e.Y)) { return }
+
+    if ($e.Button -eq [System.Windows.Forms.MouseButtons]::Left) {
+        $script:dragStartPx = $e.X
+        $script:dragStart   = Px-ToDataX $e.X
+        $script:isDragging  = $false
+    }
+})
+
+$chart.Add_MouseMove({
+    param($s, $e)
+    # Tooltip (always)
+    try {
+        if ($chart.ChartAreas.Count -gt 0 -and (Px-InPlotArea $e.X $e.Y)) {
+            $xVal    = $chart.ChartAreas[0].AxisX.PixelPositionToValue($e.X)
+            $fnA     = $combo.SelectedItem.ToString()
+            $nearest = $allTestData[$fnA] | Sort-Object { [math]::Abs($_.Time - $xVal) } | Select-Object -First 1
+            if ($nearest) {
+                $tip = "--- A ---`nT = $($nearest.Time) s`nBitrate: $($nearest.Bitrate) Mbps`nJitter:  $($nearest.Jitter) ms`nLoss:    $($nearest.Loss) %"
+                $fnB = if ($combo2.SelectedIndex -gt 0) { $combo2.SelectedItem.ToString() } else { $null }
+                if ($fnB -and $allTestData.ContainsKey($fnB)) {
+                    $nb = $allTestData[$fnB] | Sort-Object { [math]::Abs($_.Time - $xVal) } | Select-Object -First 1
+                    if ($nb) { $tip += "`n--- B ---`nT = $($nb.Time) s`nBitrate: $($nb.Bitrate) Mbps`nJitter:  $($nb.Jitter) ms`nLoss:    $($nb.Loss) %" }
+                }
+                $toolTip.SetToolTip($chart, $tip)
+            }
+        } else { $toolTip.SetToolTip($chart, "") }
+    } catch {}
+
+    # Drag detection — mark as dragging after 4px movement
+    if ($e.Button -eq [System.Windows.Forms.MouseButtons]::Left -and $script:dragStart -ge 0) {
+        if ([math]::Abs($e.X - $script:dragStartPx) -gt 4) {
+            $script:isDragging = $true
+        }
+        if ($script:isDragging) {
+            $script:dragCurPx = $e.X
+            # Show cursor line at current position
+            $curX = Px-ToDataX $e.X
+            if (-not [double]::IsNaN($curX)) {
+                foreach ($a in $chart.ChartAreas) { $a.CursorX.Position = $curX }
+            }
+            $chart.Invalidate()
+        }
+    }
+})
+
+$chart.Add_MouseUp({
+    param($s, $e)
+    if ($e.Button -eq [System.Windows.Forms.MouseButtons]::Left) {
+        $endX = Px-ToDataX $e.X
+
+        if ($script:isDragging -and $script:dragStart -ge 0 -and -not [double]::IsNaN($endX)) {
+            # Drag ended — zoom to selected range
+            $t1 = [math]::Min($script:dragStart, $endX)
+            $t2 = [math]::Max($script:dragStart, $endX)
+            if (($t2 - $t1) -gt 0.05) {
+                foreach ($a in $chart.ChartAreas) { $a.AxisX.ScaleView.Zoom($t1, $t2) }
+                # Clear cursor after zoom
+                foreach ($a in $chart.ChartAreas) { $a.CursorX.Position = [double]::NaN }
+            }
+        } elseif (-not $script:isDragging -and $script:dragStart -ge 0) {
+            # Simple click — snap marker to nearest data point
+            $snapX = Px-ToDataX $e.X
+            if (-not [double]::IsNaN($snapX)) {
+                foreach ($a in $chart.ChartAreas) { $a.CursorX.Position = $snapX }
+            }
+        }
+
+        $script:dragStart   = -1.0
+        $script:dragStartPx = -1
+        $script:dragCurPx   = -1
+        $script:isDragging  = $false
+        $chart.Invalidate()
+    }
+
     if ($e.Button -eq [System.Windows.Forms.MouseButtons]::Right) {
-        foreach ($a in $chart.ChartAreas) { $a.AxisX.ScaleView.ZoomReset(0); $a.CursorX.Position = [double]::NaN }
+        foreach ($a in $chart.ChartAreas) {
+            $a.AxisX.ScaleView.ZoomReset(0)
+            $a.CursorX.Position = [double]::NaN
+        }
         $chart.Invalidate()
     }
 })
@@ -1024,7 +1371,7 @@ function Save-FullUI {
     $bmp  = New-Object System.Drawing.Bitmap($form.Width, $form.Height)
     $g    = [System.Drawing.Graphics]::FromImage($bmp)
     $g.CopyFromScreen($form.Location.X, $form.Location.Y, 0, 0, $form.Size)
-    $outDir   = if (Test-Path $Path -PathType Container) { $Path } else { (Get-Item $Path).DirectoryName }
+    $outDir   = if ($outPath -ne '') { $outPath } elseif (Test-Path $Path -PathType Container) { $Path } else { (Get-Item $Path).DirectoryName }
     $baseName = if ([string]::IsNullOrWhiteSpace($FileName)) { $combo.SelectedItem.ToString() } else { $FileName }
     $finalName = if ($baseName -notmatch '\.png$') { $baseName + ".png" } else { $baseName }
     $outPath  = Join-Path $outDir $finalName
@@ -1144,24 +1491,59 @@ function Show-Legend {
 function Show-Help {
     $t  = $script:theme
     $hw = New-Object System.Windows.Forms.Form
-    $hw.Text            = "iPerf3 v3.22 - Help"
+    $hw.Text            = "iPerf3 v3.46 - Help"
     $hw.Width           = 980
-    $hw.Height          = 820
+    $hw.Height          = 860
     $hw.StartPosition   = "CenterParent"
     $hw.BackColor       = $t.Bg
     $hw.FormBorderStyle = "Sizable"
-    $hw.MinimumSize     = New-Object System.Drawing.Size(700, 620)
+    $hw.MinimumSize     = New-Object System.Drawing.Size(700, 640)
 
     $fntH   = New-Object System.Drawing.Font("Consolas", 9)
     $fntHdr = New-Object System.Drawing.Font("Arial", 9, [System.Drawing.FontStyle]::Bold)
+    $fntFtr = New-Object System.Drawing.Font("Consolas", 8)
 
-    # Two RichTextBox columns side by side
+    $dim  = $t.FgDim; $fg = $t.Fg
+    $acc  = $t.AccentA; $acc2 = $t.AccentB
+    $link = [System.Drawing.Color]::DeepSkyBlue
+
+    # Footer panel — fixed height at bottom
+    $footerH = 44
+    $footer           = New-Object System.Windows.Forms.Panel
+    $footer.Dock      = "Bottom"
+    $footer.Height    = $footerH
+    $footer.BackColor = $t.Panel
+    $hw.Controls.Add($footer)
+
+    $lblFooter           = New-Object System.Windows.Forms.Label
+    $lblFooter.Text      = "(c) 2026 Varset & Gemini Dev  |  v3.46 by Claude"
+    $lblFooter.Font      = $fntFtr
+    $lblFooter.ForeColor = $t.FgDim
+    $lblFooter.Left      = 12; $lblFooter.Top = 4
+    $lblFooter.AutoSize  = $true
+    $footer.Controls.Add($lblFooter)
+
+    # Clickable link label
+    $lnk           = New-Object System.Windows.Forms.LinkLabel
+    $lnk.Text      = "Extended Manual (Rus/Eng):  https://github.com/Varsett/iPerf3VisualAnalyzer"
+    $lnk.Font      = $fntFtr
+    $lnk.Left      = 12; $lnk.Top = 22
+    $lnk.AutoSize  = $true
+    $lnk.LinkColor = $link
+    $lnk.ActiveLinkColor = [System.Drawing.Color]::White
+    $lnk.BackColor = $t.Panel
+    $lnk.Add_LinkClicked({
+        Start-Process "https://github.com/Varsett/iPerf3VisualAnalyzer"
+    })
+    $footer.Controls.Add($lnk)
+
+    # Two RichTextBox columns filling the space above footer
     $col1 = New-Object System.Windows.Forms.RichTextBox
     $col1.Left = 8; $col1.Top = 8; $col1.Width = 470
     $col1.Anchor = "Top,Left,Bottom"
     $col1.ReadOnly = $true; $col1.BorderStyle = "None"
     $col1.Font = $fntH; $col1.BackColor = $t.Bg; $col1.ForeColor = $t.Fg
-    $col1.ScrollBars = "Vertical"; $col1.WordWrap = $true
+    $col1.ScrollBars = "None"; $col1.WordWrap = $true
     $hw.Controls.Add($col1)
 
     $col2 = New-Object System.Windows.Forms.RichTextBox
@@ -1169,19 +1551,17 @@ function Show-Help {
     $col2.Anchor = "Top,Left,Right,Bottom"
     $col2.ReadOnly = $true; $col2.BorderStyle = "None"
     $col2.Font = $fntH; $col2.BackColor = $t.Bg; $col2.ForeColor = $t.Fg
-    $col2.ScrollBars = "Vertical"; $col2.WordWrap = $true
+    $col2.ScrollBars = "None"; $col2.WordWrap = $true
     $hw.Controls.Add($col2)
 
-    $hw.Add_Resize({
-        $col1.Height = $hw.ClientSize.Height - 16
-        $col2.Height = $hw.ClientSize.Height - 16
+    function Set-ColHeights {
+        $avail = $hw.ClientSize.Height - $footerH - 16
+        $col1.Height = $avail
+        $col2.Height = $avail
         $col2.Width  = $hw.ClientSize.Width - $col2.Left - 8
-    })
-    $col1.Height = $hw.ClientSize.Height - 16
-    $col2.Height = $hw.ClientSize.Height - 16
-
-    $dim = $t.FgDim; $fg = $t.Fg
-    $acc = $t.AccentA; $acc2 = $t.AccentB
+    }
+    $hw.Add_Resize({ Set-ColHeights })
+    Set-ColHeights
 
     function Hdr([System.Windows.Forms.RichTextBox]$box, [string]$text) {
         $box.SelectionStart = $box.TextLength
@@ -1200,11 +1580,12 @@ function Show-Help {
         $box.SelectionColor = $dim; $box.AppendText("$text`n")
     }
     function Br([System.Windows.Forms.RichTextBox]$box) {
-        $box.SelectionStart = $box.TextLength
-        $box.AppendText("`n")
+        $box.SelectionStart = $box.TextLength; $box.AppendText("`n")
     }
 
-    # ---- COLUMN 1 ----
+    # ════════════════════════════════════════
+    #  COLUMN 1
+    # ════════════════════════════════════════
     Hdr  $col1 "INTERFACE CONTROLS"
     Lin  $col1 "Left click"    "Place gold cursor marker"
     Lin  $col1 "Right click"   "Reset zoom and marker"
@@ -1214,64 +1595,60 @@ function Show-Help {
     Lin  $col1 "Zoom [-/+]"    "Incremental zoom buttons"
     Lin  $col1 "Button [A]"    "Toggle graph A visibility"
     Lin  $col1 "Button [B]"    "Toggle graph B visibility"
+    Lin  $col1 "All Logs"      "Show RT-Monitor CSV logs in lists"
+    Txt  $col1 "                 Off: CSVs hidden unless referenced"
+    Txt  $col1 "                 by -CsvPath/-AView/-BView/Summary"
     Lin  $col1 "Combo A"       "Primary session (solid lines)"
     Lin  $col1 "Combo B"       "Comparison session (dashed lines)"
-    Lin  $col1 "Summary"       "Table of all sessions"
+    Lin  $col1 "Summary"       "All sessions table"
     Txt  $col1 "                 Single click = select row"
     Txt  $col1 "                 Double click = load as B"
-    Lin  $col1 "CSV"           "Export session A data to CSV"
+    Lin  $col1 "CSV"           "Export session A to CSV"
     Lin  $col1 "Legend"        "Color and line style guide"
-    Lin  $col1 "Dark/Light"    "Toggle dark/light theme"
+    Lin  $col1 "Dark/Light"    "Toggle theme"
     Lin  $col1 "Save PNG"      "Save full UI screenshot"
     Br   $col1
 
     Hdr  $col1 "CLI PARAMETERS"
-    Lin  $col1 "-Path"         "Folder or file (optional)"
-    Txt  $col1 "                 Auto-searches script folder if omitted"
+    Lin  $col1 "-WorkDir"      "Folder to scan for log files"
+    Txt  $col1 "                 Auto-finds logs in script folder"
+    Lin  $col1 "-SavePath"     "Folder for PNG and CSV output"
+    Txt  $col1 "                 Default: script folder"
     Lin  $col1 "-Label"        "Session name shown in Test Info"
-    Lin  $col1 "-Interval"     "iPerf3 reporting step (e.g. 0.1s)"
+    Lin  $col1 "-Protocol"     "Protocol label (e.g. TCP / UDP)"
+    Lin  $col1 "-Interval"     "Reporting step (e.g. 0.1s)"
     Lin  $col1 "-Streams"      "Parallel streams count (-P)"
     Lin  $col1 "-Duration"     "Total test duration (-t)"
-    Lin  $col1 "-TBitrate" "Requested bandwidth (e.g. 150M)"
-    Lin  $col1 "-WarnLoss"     "Loss% warning threshold (default 1.0)"
-    Lin  $col1 "-AView"        "Substring to select file for graph A"
+    Lin  $col1 "-TBitrate"     "Target bandwidth (e.g. 150M)"
+    Lin  $col1 "-WarnLoss"     "Loss% warning threshold (def. 1.0)"
+    Lin  $col1 "-AView"        "Substring for graph A filename"
     Txt  $col1 "                 Latest match by timestamp wins"
-    Lin  $col1 "-BView"        "Substring to select file for graph B"
+    Lin  $col1 "-BView"        "Substring for graph B filename"
     Txt  $col1 "                 Latest match by timestamp wins"
     Lin  $col1 "-FileName"     "Custom output PNG filename"
+    Lin  $col1 "-CsvPath"      "iPerf RT Monitor CSV log file"
+    Txt  $col1 "                 Header: Time_sec,Bitrate_Mbps,"
+    Txt  $col1 "                         Loss_pct,Jitter_ms"
+    Lin  $col1 "-AllLogs"      "Show all logs incl. RT-Monitor CSVs"
+    Txt  $col1 "                 Same as pressing the All Logs button"
     Lin  $col1 "-Screenshot"   "Auto-save screenshot on startup"
     Lin  $col1 "-Exit"         "Close after screenshot"
     Br   $col1
 
-    Hdr  $col1 "AUTOMATION EXAMPLES"
-    Txt  $col1 "  # Basic - auto-finds logs next to script"
-    Txt  $col1 "  powershell -Command `"& 'script.ps1'`""
+    Hdr  $col1 "AUTOMATION (.bat)"
+    Txt  $col1 "  Use -Command not -File for string params!"
     Br   $col1
-    Txt  $col1 "  # A+B screenshot via .bat (use -Command!):"
     Txt  $col1 "  powershell -Command `"& '%SCRIPT%'``"
     Txt  $col1 "    -Path '%LOGDIR%'``"
     Txt  $col1 "    -AView 'Direct' -BView 'Reverse'``"
     Txt  $col1 "    -FileName 'Report' -Screenshot -Exit`""
-    Br   $col1
-    Txt  $col1 "  NOTE: Use -Command not -File when passing"
-    Txt  $col1 "  string parameters from a .bat file."
-    Br   $col1
-    Hdr  $col1 "EXTENDED MANUAL (Rus / Eng)"
-#    $col2.SelectionStart = $col2.TextLength
-#    $col2.SelectionColor = [System.Drawing.Color]::DeepSkyBlue
-#    $col2.AppendText("  https://github.com/Varsett/iPerf3VisualAnalyzer`n")
-#    Br   $col1
-#    Txt  $col1 "  
-#    Txt  $col1 "  
-    Txt  $col1 "https://github.com/Varsett/iPerf3VisualAnalyzer"
-    Br   $col1
-    Txt  $col1 "(c) 2026 Varset & Gemini Dev | v3.22 by Claude"
 
-
-    # ---- COLUMN 2 ----
+    # ════════════════════════════════════════
+    #  COLUMN 2
+    # ════════════════════════════════════════
     Hdr  $col2 "DATA INTERPRETATION"
     Lin  $col2 "Bitrate"       "Throughput in Mbps. Drops = congestion"
-    Lin  $col2 "Jitter"        "Inter-packet delay variance. Target <0.2ms"
+    Lin  $col2 "Jitter"        "Inter-packet delay variance. Target<0.2ms"
     Lin  $col2 "Loss"          "Packet loss %. Target 0%. >1% = artifacts"
     Br   $col2
 
@@ -1282,35 +1659,29 @@ function Show-Help {
     Lin  $col2 "RED"           "Bit<50%  | Jitter>1.2ms | Loss>1%"
     Br   $col2
 
-    Hdr  $col2 "VERDICT BOX (bottom right)"
-    Txt  $col2 "  Shows average quality rating per dataset."
-    Txt  $col2 "  A: = Graph A  B: = Graph B"
-    Br   $col2
-    Lin  $col2 "Loss rating"   ""
-    Lin  $col2 "  PERFECT"     "0% loss. Ideal."
-    Lin  $col2 "  GOOD"        "Up to 0.1%. Negligible noise."
-    Lin  $col2 "  MODERATE"    "0.1-1.0%. Some impact possible."
-    Lin  $col2 "  HIGH"        "1.0-3.0%. Noticeable degradation."
-    Lin  $col2 "  CRITICAL"    "Above 3.0%. Severe data loss."
-    Br   $col2
-    Lin  $col2 "Jitter rating" ""
-    Lin  $col2 "  EXCELLENT"   "Below 0.2ms. Ideal for real-time."
-    Lin  $col2 "  GOOD"        "0.2-0.8ms. Acceptable."
-    Lin  $col2 "  POOR"        "0.8-1.2ms. May cause issues."
-    Lin  $col2 "  CRITICAL"    "Above 1.2ms. Calls/video affected."
-    Br   $col2
-    Lin  $col2 "Bitrate rating" ""
-    Lin  $col2 "  EXCELLENT"   "Min >= 90% of Max. Very stable."
-    Lin  $col2 "  GOOD"        "Min >= 75% of Max. Minor drops."
-    Lin  $col2 "  POOR"        "Min >= 50% of Max. Unstable."
-    Lin  $col2 "  CRITICAL"    "Min < 50% of Max. Severe drops."
-    Txt  $col2 "  (rating compares Min to Max in session)"
+    Hdr  $col2 "VERDICT BOX  (A: = Graph A,  B: = Graph B)"
+    Lin  $col2 "Loss"          ""
+    Lin  $col2 "  PERFECT"     "0% loss"
+    Lin  $col2 "  GOOD"        "up to 0.1%"
+    Lin  $col2 "  MODERATE"    "0.1 - 1.0%"
+    Lin  $col2 "  HIGH"        "1.0 - 3.0%"
+    Lin  $col2 "  CRITICAL"    "above 3.0%"
+    Lin  $col2 "Jitter"        ""
+    Lin  $col2 "  EXCELLENT"   "< 0.2 ms"
+    Lin  $col2 "  GOOD"        "0.2 - 0.8 ms"
+    Lin  $col2 "  POOR"        "0.8 - 1.2 ms"
+    Lin  $col2 "  CRITICAL"    "> 1.2 ms"
+    Lin  $col2 "Bitrate"       "(Min vs Max of session)"
+    Lin  $col2 "  EXCELLENT"   "Min >= 90% of Max"
+    Lin  $col2 "  GOOD"        "Min >= 75% of Max"
+    Lin  $col2 "  POOR"        "Min >= 50% of Max"
+    Lin  $col2 "  CRITICAL"    "Min <  50% of Max"
     Br   $col2
 
     Hdr  $col2 "PACKETS LOST (receiver total)"
     Lin  $col2 "GREEN"         "0 lost. Perfect."
     Lin  $col2 "YELLOW"        "Up to 0.1%. Negligible."
-    Lin  $col2 "ORANGE"        "0.1-1.0%. Potential lag."
+    Lin  $col2 "ORANGE"        "0.1 - 1.0%. Potential lag."
     Lin  $col2 "RED"           "Above 1.0%. High risk."
     Br   $col2
 
@@ -1319,18 +1690,10 @@ function Show-Help {
     Txt  $col2 "  Multiple matches: latest LastWriteTime wins."
     Txt  $col2 "  Fallback: parses YYYY-MM-DD_HH-MM-SS from name."
     Br   $col2
-    Txt  $col2 "  Example:"
     Txt  $col2 "  WiFiTest-Direct-2026-05-13_01-24-51.txt"
     Txt  $col2 "    matched by -AView 'Direct'"
     Txt  $col2 "  WiFiTest-Reverse-2026-05-13_01-24-51.txt"
     Txt  $col2 "    matched by -BView 'Reverse'"
-#    Br   $col2
-#    Txt  $col2 "  (c) 2026 Varset & Gemini Dev | v3.22 by Claude"
-#    Br   $col2
-#    Hdr  $col2 "EXTENDED MANUAL (Rus / Eng)"
-#    $col2.SelectionStart = $col2.TextLength
-#    $col2.SelectionColor = [System.Drawing.Color]::DeepSkyBlue
-#    $col2.AppendText("  https://github.com/Varsett/iPerf3VisualAnalyzer`n")
 
     $hw.ShowDialog()
 }
@@ -1349,6 +1712,12 @@ $combo.Add_SelectedIndexChanged({
 })
 $combo2.Add_SelectedIndexChanged({
     $script:showB = $true; $btnB.Text = "B"
+    Update-Chart $combo.SelectedItem (Get-SelectedB)
+})
+$btnAllLogs.Add_Click({
+    $script:showAllLogs = -not $script:showAllLogs
+    Refresh-ComboItems
+    Apply-Theme-To-Controls
     Update-Chart $combo.SelectedItem (Get-SelectedB)
 })
 $btnDark.Add_Click({
@@ -1383,10 +1752,7 @@ function Select-BestKey([string]$substring) {
     # Multiple matches — pick latest
     $best = $null
     $bestTime = [datetime]::MinValue
-    $baseDir = if ($Path -ne "" -and (Test-Path $Path)) {
-        if ((Get-Item $Path) -is [System.IO.FileInfo]) { (Get-Item $Path).DirectoryName }
-        else { $Path }
-    } else { $null }
+    $baseDir = if ($scanPath -ne "" -and (Test-Path $scanPath)) { $scanPath } else { $null }
 
     foreach ($key in $matched) {
         $t = [datetime]::MinValue
@@ -1407,6 +1773,19 @@ function Select-BestKey([string]$substring) {
 # Resolve A and B BEFORE registering Add_Shown
 $script:autoKeyA = if ($AView -ne "") { Select-BestKey $AView } else { $null }
 $script:autoKeyB = if ($BView -ne "") { Select-BestKey $BView } else { $null }
+
+# Guard: if both -AView and -BView resolve to the identical file (e.g. both
+# patterns are too generic and match the same item), drop the B selection
+# rather than silently comparing a file against itself.
+if ($script:autoKeyA -and $script:autoKeyB -and $script:autoKeyA -eq $script:autoKeyB) {
+    $script:autoKeyB = $null
+}
+
+# If a resolved key is an RT-Monitor CSV not normally shown, make it visible
+foreach ($k in @($script:autoKeyA, $script:autoKeyB)) {
+    if ($k -and $script:isCsvRT[$k]) { [void]$script:alwaysVisibleKeys.Add($k) }
+}
+Refresh-ComboItems
 
 # Apply A selection immediately (before initial draw)
 if ($script:autoKeyA) {
