@@ -280,7 +280,7 @@ $fntTitle = New-Object System.Drawing.Font("Segoe UI", 12, [System.Drawing.FontS
 #  FORM
 # ================================================================
 $form               = New-Object System.Windows.Forms.Form
-$form.Text          = "iPerf3 v3.46 Visual Diagnostic"
+$form.Text          = "iPerf3 v3.47 Visual Diagnostic"
 $form.Width         = 1680
 $form.Height        = 970
 $form.StartPosition = "CenterScreen"
@@ -380,7 +380,8 @@ function New-Btn([string]$text, [int]$left, [int]$width, [int]$top=16) {
 # ================================================================
 #  TOP CONTROLS
 # ================================================================
-$sortedKeys = @($allTestData.Keys | Sort-Object)
+$script:sortedKeys = @($allTestData.Keys | Sort-Object)
+$sortedKeys = $script:sortedKeys   # local alias for existing code
 
 # Keys explicitly referenced get shown regardless of the All Logs toggle
 $script:alwaysVisibleKeys = New-Object System.Collections.Generic.HashSet[string]
@@ -394,8 +395,8 @@ if ($CsvPath -ne "" -and (Test-Path $CsvPath)) {
 $script:showAllLogs = $AllLogs.IsPresent
 
 function Get-VisibleKeys {
-    if ($script:showAllLogs) { return $sortedKeys }
-    return @($sortedKeys | Where-Object {
+    if ($script:showAllLogs) { return $script:sortedKeys }
+    return @($script:sortedKeys | Where-Object {
         -not $script:isCsvRT[$_] -or $script:alwaysVisibleKeys.Contains($_)
     })
 }
@@ -433,41 +434,53 @@ foreach ($k in $script:visKeysInit) { [void]$combo.Items.Add($k) }
 $combo.SelectedIndex = 0
 $panel.Controls.Add($combo)
 
-# Button A
-$btnA              = New-Btn "A" 420 28
+# Load file button for A  [...]  sits between combo A and button A
+$btnLoadA      = New-Btn "..." 418 26
+$btnLoadA.Font = New-Object System.Drawing.Font("Consolas", 8, [System.Drawing.FontStyle]::Bold)
+$btnLoadA.UseCompatibleTextRendering = $true
+$btnLoadA.FlatAppearance.BorderSize = 1
+
+# Button A — shifted right by 28px
+$btnA              = New-Btn "A" 448 28
 $btnA.ForeColor    = [System.Drawing.Color]::DeepSkyBlue
 $script:showA      = $true
 
-# Combo B
+# Combo B — shifted right by 28px
 $combo2               = New-Object System.Windows.Forms.ComboBox
-$combo2.Left          = 460; $combo2.Top = 16; $combo2.Width = 285; $combo2.Font = $fntCombo
+$combo2.Left          = 490; $combo2.Top = 16; $combo2.Width = 285; $combo2.Font = $fntCombo
 $combo2.DropDownStyle = "DropDownList"
 [void]$combo2.Items.Add("-- No Compare --")
 foreach ($k in (Get-VisibleKeys)) { [void]$combo2.Items.Add($k) }
 $combo2.SelectedIndex = 0
 $panel.Controls.Add($combo2)
 
-# Button B
-$btnB              = New-Btn "B" 750 28
+# Load file button for B  [...]  sits between combo B and button B
+$btnLoadB      = New-Btn "..." 778 26
+$btnLoadB.Font = New-Object System.Drawing.Font("Consolas", 8, [System.Drawing.FontStyle]::Bold)
+$btnLoadB.UseCompatibleTextRendering = $true
+$btnLoadB.FlatAppearance.BorderSize = 1
+
+# Button B — shifted right
+$btnB              = New-Btn "B" 808 28
 $btnB.ForeColor    = [System.Drawing.Color]::MediumSpringGreen
 $script:showB      = $true
 
-# Action buttons
-$btnSummary = New-Btn "Summary" 794  80
-$btnSave    = New-Btn "Save PNG" 880  84
-$btnExport  = New-Btn "CSV"      970  52
+# Action buttons — shifted right to match
+$btnSummary = New-Btn "Summary" 852  80
+$btnSave    = New-Btn "Save PNG" 938  84
+$btnExport  = New-Btn "CSV"      1028 52
 
-# Zoom cluster
-$btnZoomOut      = New-Btn "-" 1030 28
+# Zoom cluster — shifted right
+$btnZoomOut      = New-Btn "-" 1088 28
 $btnZoomOut.Font = New-Object System.Drawing.Font("Arial", 12, [System.Drawing.FontStyle]::Bold)
 $btnZoomOut.UseCompatibleTextRendering = $true
 
 $lblZoom           = New-Object System.Windows.Forms.Label
-$lblZoom.Text      = "Zoom"; $lblZoom.Left = 1061; $lblZoom.Top = 20
+$lblZoom.Text      = "Zoom"; $lblZoom.Left = 1119; $lblZoom.Top = 20
 $lblZoom.Width     = 46; $lblZoom.TextAlign = "MiddleCenter"; $lblZoom.Font = $fntLabel
 $panel.Controls.Add($lblZoom)
 
-$btnZoomIn       = New-Btn "+" 1110 28
+$btnZoomIn       = New-Btn "+" 1168 28
 $btnZoomIn.Font  = New-Object System.Drawing.Font("Arial", 12, [System.Drawing.FontStyle]::Bold)
 $btnZoomIn.UseCompatibleTextRendering = $true
 
@@ -697,7 +710,8 @@ function Apply-Theme-To-Controls {
     $verdictBox.ForeColor     = $t.Fg
 
     foreach ($c in @($btnSave, $btnHelp, $btnLegend, $btnDark, $combo, $combo2,
-                     $btnZoomIn, $btnZoomOut, $btnSummary, $btnExport, $btnA, $btnB, $btnAllLogs)) {
+                     $btnZoomIn, $btnZoomOut, $btnSummary, $btnExport,
+                     $btnA, $btnB, $btnAllLogs, $btnLoadA, $btnLoadB)) {
         $c.BackColor = $t.Ctrl
         $c.ForeColor = if ($c -eq $btnA) { $t.Bit }
                        elseif ($c -eq $btnB) { $t.Bit2 }
@@ -984,7 +998,7 @@ function Update-Chart([string]$fileNameA, [string]$fileNameB) {
         $avgLossB = [math]::Round(($dataB.Loss | Measure-Object -Average).Average, 2)
         if ($avgLossB -gt $warnLossThreshold) { $isWarn = $true }
     }
-    $form.Text = if ($isWarn) { "iPerf3 v3.46  [!] HIGH LOSS" } else { "iPerf3 v3.46 Visual Diagnostic" }
+    $form.Text = if ($isWarn) { "iPerf3 v3.47  [!] HIGH LOSS" } else { "iPerf3 v3.47 Visual Diagnostic" }
 
     Update-Stats $dataA $fileNameA $dataB $fileNameB
 }
@@ -1059,8 +1073,27 @@ function Show-Summary {
     $grid.RowHeadersVisible      = $false
     $grid.AutoSizeColumnsMode     = "AllCells"
 
-    foreach ($col in @("File","Bit Min","Bit Avg","Bit Max","Jit Min","Jit Avg","Jit Max","Loss Min","Loss Avg","Loss Max","Pkts Lost","Total")) {
-        [void]$grid.Columns.Add($col, $col)
+    # Typed columns: string for File, double for numeric, int for packet counts
+    $colDefs = @(
+        @{Name="File";     Type=[string]},
+        @{Name="Bit Min";  Type=[double]},
+        @{Name="Bit Avg";  Type=[double]},
+        @{Name="Bit Max";  Type=[double]},
+        @{Name="Jit Min";  Type=[double]},
+        @{Name="Jit Avg";  Type=[double]},
+        @{Name="Jit Max";  Type=[double]},
+        @{Name="Loss Min"; Type=[double]},
+        @{Name="Loss Avg"; Type=[double]},
+        @{Name="Loss Max"; Type=[double]},
+        @{Name="Pkts Lost";Type=[int]},
+        @{Name="Total";    Type=[int]}
+    )
+    foreach ($cd in $colDefs) {
+        $c = New-Object System.Windows.Forms.DataGridViewTextBoxColumn
+        $c.Name = $cd.Name; $c.HeaderText = $cd.Name
+        $c.SortMode = [System.Windows.Forms.DataGridViewColumnSortMode]::Automatic
+        $c.ValueType = $cd.Type
+        [void]$grid.Columns.Add($c)
     }
 
     $rowMap = @{}
@@ -1076,15 +1109,30 @@ function Show-Summary {
         $lAvg = [math]::Round(($d.Loss | Measure-Object -Average).Average, 2)
         $lMax = [math]::Round(($d.Loss | Measure-Object -Max).Maximum, 2)
         $td   = $totalsData[$fn]
-        $lost = if ($null -ne $td) { $td.Lost  } else { "n/a" }
-        $tot  = if ($null -ne $td) { $td.Total } else { "n/a" }
+        # Use -1 for missing packet data (CSV/TCP logs) so column stays typed [int]
+        $lost = if ($null -ne $td) { [int]$td.Lost  } else { [int]-1 }
+        $tot  = if ($null -ne $td) { [int]$td.Total } else { [int]-1 }
         $ri   = $grid.Rows.Add($fn, $bMin, $bAvg, $bMax, $jMin, $jAvg, $jMax, $lMin, $lAvg, $lMax, $lost, $tot)
         $rowMap[$ri] = $fn
         $lossColor = if ($lAvg -eq 0) { [System.Drawing.Color]::FromArgb(255,30,60,30) }
                      elseif ($lAvg -le 1) { [System.Drawing.Color]::FromArgb(255,60,55,20) }
                      else { [System.Drawing.Color]::FromArgb(255,70,25,25) }
         $grid.Rows[$ri].DefaultCellStyle.BackColor = $lossColor
+        # Display -1 as "—" in packet count cells
+        if ($lost -eq -1) {
+            $grid.Rows[$ri].Cells["Pkts Lost"].Value = [int]-1
+            $grid.Rows[$ri].Cells["Pkts Lost"].Style.Format = ""
+            $grid.Rows[$ri].Cells["Total"].Value = [int]-1
+        }
     }
+    # Format -1 as "—" via CellFormatting event
+    $grid.Add_CellFormatting({
+        param($gs, $ge)
+        if ($ge.ColumnIndex -ge 10 -and $ge.Value -is [int] -and $ge.Value -eq -1) {
+            $ge.Value = "n/a"
+            $ge.FormattingApplied = $true
+        }
+    })
 
     # Double-click: load row as B
     $grid.Add_CellDoubleClick({
@@ -1491,7 +1539,7 @@ function Show-Legend {
 function Show-Help {
     $t  = $script:theme
     $hw = New-Object System.Windows.Forms.Form
-    $hw.Text            = "iPerf3 v3.46 - Help"
+    $hw.Text            = "iPerf3 v3.47 - Help"
     $hw.Width           = 980
     $hw.Height          = 860
     $hw.StartPosition   = "CenterParent"
@@ -1516,7 +1564,7 @@ function Show-Help {
     $hw.Controls.Add($footer)
 
     $lblFooter           = New-Object System.Windows.Forms.Label
-    $lblFooter.Text      = "(c) 2026 Varset & Gemini Dev  |  v3.46 by Claude"
+    $lblFooter.Text      = "(c) 2026 Varset & Gemini Dev  |  v3.47 by Claude"
     $lblFooter.Font      = $fntFtr
     $lblFooter.ForeColor = $t.FgDim
     $lblFooter.Left      = 12; $lblFooter.Top = 4
@@ -1697,6 +1745,101 @@ function Show-Help {
 
     $hw.ShowDialog()
 }
+
+# ================================================================
+#  LOAD FILE FROM DISK  (... buttons)
+# ================================================================
+function Load-FileIntoAnalyzer([System.Windows.Forms.ComboBox]$targetCombo, [bool]$isB) {
+    $dlg = New-Object System.Windows.Forms.OpenFileDialog
+    $dlg.Title  = if ($isB) { "Load log file for Graph B" } else { "Load log file for Graph A" }
+    $dlg.Filter = "All supported files (*.txt;*.log;*.csv)|*.txt;*.log;*.csv|All files (*.*)|*.*"
+    $dlg.Multiselect = $false
+    if ($dlg.ShowDialog() -ne [System.Windows.Forms.DialogResult]::OK) { return }
+
+    $file = Get-Item -Path $dlg.FileName
+    $key  = $file.Name
+
+    # Already loaded?
+    if ($script:allTestData.ContainsKey($key)) {
+        $idx = $targetCombo.Items.IndexOf($key)
+        if ($idx -ge 0) { $targetCombo.SelectedIndex = $idx; return }
+    }
+
+    # Try parsing — iPerf3 log first, then RT-CSV
+    $parsed   = $null
+    $isCsvLog = $false
+    $unitMap  = @{ 'Gbits/sec' = 1000; 'Mbits/sec' = 1; 'Kbits/sec' = 0.001 }
+
+    $content  = Get-Content $file.FullName -Encoding UTF8
+    $rawLines = $content | Where-Object {
+        $_ -match '\[\s*\d+\]\s+\d+\.\d+-\d+\.\d+\s+sec' -and $_ -notmatch 'sender|receiver'
+    }
+    $parsed = foreach ($line in $rawLines) {
+        if ($line -match '(?<interval>\d+\.\d+-\d+\.\d+).+?\s+(?<bitrate>[\d.]+)\s+(?<unit>Gbits/sec|Mbits/sec|Kbits/sec)\s+(?<jitter>\d+\.\d+)\s+ms\s+(?<lost>\d+)/(?<total>\d+)\s+\((?<percent>\d+(\.\d+)?)\%\)') {
+            $mul = $unitMap[$Matches['unit']]
+            [PSCustomObject]@{ Time=$([math]::Round([double]($Matches['interval'].Split('-')[1]),2)); Bitrate=$([math]::Round([double]$Matches['bitrate']*$mul,3)); Jitter=[double]$Matches['jitter']; Loss=[double]$Matches['percent'] }
+        } elseif ($line -match '(?<interval>\d+\.\d+-\d+\.\d+).+?\s+(?<bitrate>[\d.]+)\s+(?<unit>Gbits/sec|Mbits/sec|Kbits/sec)') {
+            $mul = $unitMap[$Matches['unit']]
+            [PSCustomObject]@{ Time=$([math]::Round([double]($Matches['interval'].Split('-')[1]),2)); Bitrate=$([math]::Round([double]$Matches['bitrate']*$mul,3)); Jitter=0.0; Loss=0.0; IsTCP=$true }
+        }
+    }
+
+    if (-not $parsed) {
+        # Try RT-Monitor CSV
+        $ok = Add-CsvRTLog $file
+        if ($ok) { $parsed = $script:allTestData[$key]; $isCsvLog = $true }
+    }
+
+    if (-not $parsed) {
+        $ans = [System.Windows.Forms.MessageBox]::Show(
+            "File '$($file.Name)' was not recognized as a supported iPerf3 log format.`n`nContinue trying to load anyway?",
+            "Unrecognized format",
+            [System.Windows.Forms.MessageBoxButtons]::YesNo,
+            [System.Windows.Forms.MessageBoxIcon]::Warning)
+        if ($ans -ne [System.Windows.Forms.DialogResult]::Yes) { return }
+
+        # Force-try CSV parse one more time ignoring header check
+        $rawText = [System.IO.File]::ReadAllText($file.FullName)
+        $rawText = $rawText.TrimStart([char]0xFEFF)
+        $csvLines = $rawText -split "`r`n|`r|`n" | Where-Object { $_.Trim() -ne "" }
+        $forceData = foreach ($row in ($csvLines | Select-Object -Skip 1)) {
+            $cols = $row -split ','
+            if ($cols.Count -lt 2) { continue }
+            try {
+                $t = [math]::Round([double]$cols[0].Trim(), 3)
+                $b = [math]::Round([double]$cols[1].Trim(), 3)
+                $l = if ($cols.Count -gt 2) { [double]$cols[2].Trim() } else { 0 }
+                $j = if ($cols.Count -gt 3) { [double]$cols[3].Trim() } else { 0 }
+                [PSCustomObject]@{ Time=$t; Bitrate=$b; Jitter=$j; Loss=$l }
+            } catch { }
+        }
+        if ($forceData) {
+            $parsed = $forceData; $isCsvLog = $true
+        } else {
+            [System.Windows.Forms.MessageBox]::Show("Could not parse any data from '$($file.Name)'.", "Parse failed", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error)
+            return
+        }
+    }
+
+    # Register in allTestData
+    if (-not $script:allTestData.ContainsKey($key)) {
+        $script:allTestData[$key]  = $parsed
+        $script:totalsData[$key]   = $null
+        $script:isTCPLog[$key]     = ($parsed | Where-Object { $_.IsTCP } | Select-Object -First 1) -ne $null
+        $script:isCsvRT[$key]      = $isCsvLog
+        # Update sortedKeys
+        $script:sortedKeys = @($script:allTestData.Keys | Sort-Object)
+        [void]$script:alwaysVisibleKeys.Add($key)
+        Refresh-ComboItems
+    }
+
+    # Select in target combo
+    $idx = $targetCombo.Items.IndexOf($key)
+    if ($idx -ge 0) { $targetCombo.SelectedIndex = $idx }
+}
+
+$btnLoadA.Add_Click({ Load-FileIntoAnalyzer $combo  $false })
+$btnLoadB.Add_Click({ Load-FileIntoAnalyzer $combo2 $true  })
 
 # ================================================================
 #  WIRING
