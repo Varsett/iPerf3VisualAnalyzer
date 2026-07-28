@@ -280,7 +280,7 @@ $fntTitle = New-Object System.Drawing.Font("Segoe UI", 12, [System.Drawing.FontS
 #  FORM
 # ================================================================
 $form               = New-Object System.Windows.Forms.Form
-$form.Text          = "iPerf3 v3.47 Visual Diagnostic"
+$form.Text          = "iPerf3 v3.48 Visual Diagnostic"
 $form.Width         = 1680
 $form.Height        = 970
 $form.StartPosition = "CenterScreen"
@@ -998,7 +998,7 @@ function Update-Chart([string]$fileNameA, [string]$fileNameB) {
         $avgLossB = [math]::Round(($dataB.Loss | Measure-Object -Average).Average, 2)
         if ($avgLossB -gt $warnLossThreshold) { $isWarn = $true }
     }
-    $form.Text = if ($isWarn) { "iPerf3 v3.47  [!] HIGH LOSS" } else { "iPerf3 v3.47 Visual Diagnostic" }
+    $form.Text = if ($isWarn) { "iPerf3 v3.48  [!] HIGH LOSS" } else { "iPerf3 v3.48 Visual Diagnostic" }
 
     Update-Stats $dataA $fileNameA $dataB $fileNameB
 }
@@ -1539,7 +1539,7 @@ function Show-Legend {
 function Show-Help {
     $t  = $script:theme
     $hw = New-Object System.Windows.Forms.Form
-    $hw.Text            = "iPerf3 v3.47 - Help"
+    $hw.Text            = "iPerf3 v3.48 - Help"
     $hw.Width           = 980
     $hw.Height          = 860
     $hw.StartPosition   = "CenterParent"
@@ -1564,7 +1564,7 @@ function Show-Help {
     $hw.Controls.Add($footer)
 
     $lblFooter           = New-Object System.Windows.Forms.Label
-    $lblFooter.Text      = "(c) 2026 Varset & Gemini Dev  |  v3.47 by Claude"
+    $lblFooter.Text      = "(c) 2026 Varset & Gemini Dev  |  v3.48 by Claude"
     $lblFooter.Font      = $fntFtr
     $lblFooter.ForeColor = $t.FgDim
     $lblFooter.Left      = 12; $lblFooter.Top = 4
@@ -1643,6 +1643,10 @@ function Show-Help {
     Lin  $col1 "Zoom [-/+]"    "Incremental zoom buttons"
     Lin  $col1 "Button [A]"    "Toggle graph A visibility"
     Lin  $col1 "Button [B]"    "Toggle graph B visibility"
+    Lin  $col1 "[...] next to A" "Browse and load a file for graph A"
+    Lin  $col1 "[...] next to B" "Browse and load a file for graph B"
+    Txt  $col1 "                 Accepts .txt .log .csv"
+    Txt  $col1 "                 Checks format, prompts if unknown"
     Lin  $col1 "All Logs"      "Show RT-Monitor CSV logs in lists"
     Txt  $col1 "                 Off: CSVs hidden unless referenced"
     Txt  $col1 "                 by -CsvPath/-AView/-BView/Summary"
@@ -1888,7 +1892,7 @@ $btnHelp.Add_Click({ Show-Help })
 function Select-BestKey([string]$substring) {
     if ($substring -eq "" -or $allTestData.Count -eq 0) { return $null }
     # Case-insensitive substring match
-    $matched = @($sortedKeys | Where-Object { $_.ToLower().Contains($substring.ToLower()) })
+    $matched = @($script:sortedKeys | Where-Object { $_.ToLower().Contains($substring.ToLower()) })
     if ($matched.Count -eq 0) { return $null }
     if ($matched.Count -eq 1) { return $matched[0] }
 
